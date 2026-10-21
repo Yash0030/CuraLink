@@ -2,6 +2,7 @@
 """Database initialization script for Personal Health Record Organizer.
 
 Applies sql/schema.sql to PostgreSQL / Neon database.
+Detects outdated table schemas and supports --reset flag.
 """
 
 import os
@@ -17,7 +18,9 @@ load_dotenv(ROOT_DIR / ".env")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-def init_database(db_url: str = None) -> bool:
+APP_TABLES = ["approvals", "events", "reports", "candidates", "runs"]
+
+def init_database(db_url: str = None, reset: bool = False) -> bool:
     url = db_url or DATABASE_URL
     if not url:
         print("[ERROR] DATABASE_URL is not set. Please set it in backend/.env or pass as argument.")
@@ -28,15 +31,32 @@ def init_database(db_url: str = None) -> bool:
         print(f"[ERROR] Schema file not found at {schema_file}")
         return False
 
-    print(f"Connecting to database...")
+    print("Connecting to database...")
     try:
-        # For pooled connection / Neon, prepare_threshold=None prevents prepared statement issues
         with psycopg.connect(url, prepare_threshold=None) as conn:
             with conn.cursor() as cur:
+                # Check if existing tables are from an outdated schema missing patient_key
+                cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='runs' AND column_name='patient_key'")
+                has_patient_key = cur.fetchone() is not None
+
+                cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name='runs'")
+                runs_exists = cur.fetchone() is not None
+
+                should_drop = reset or (runs_exists and not has_patient_key)
+
+                if should_drop:
+                    print("Detected outdated or requested reset of application tables. Recreating fresh schema...")
+                    for tbl in APP_TABLES:
+                        cur.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE;")
+                    conn.commit()
+
+                # Read and execute schema
                 with open(schema_file, "r", encoding="utf-8") as f:
                     schema_sql = f.read()
                 cur.execute(schema_sql)
+
             conn.commit()
+
         print("[SUCCESS] Schema initialized successfully. All tables and indexes are ready.")
         return True
     except Exception as e:
@@ -44,6 +64,9 @@ def init_database(db_url: str = None) -> bool:
         return False
 
 if __name__ == "__main__":
-    url_arg = sys.argv[1] if len(sys.argv) > 1 else None
-    success = init_database(url_arg)
+    reset_flag = "--reset" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--reset"]
+    url_arg = args[0] if args else None
+
+    success = init_database(url_arg, reset=reset_flag)
     sys.exit(0 if success else 1)
