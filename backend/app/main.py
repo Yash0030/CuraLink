@@ -261,11 +261,17 @@ async def login(req: UserLoginRequest):
 @app.get("/api/auth/me")
 async def get_me(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Returns the authenticated user's profile."""
+    uid = str(current_user["id"])
+    name = current_user.get("name", "")
+    email = current_user.get("email", "")
     return {
+        "id": uid,
+        "name": name,
+        "email": email,
         "user": {
-            "id": str(current_user["id"]),
-            "name": current_user["name"],
-            "email": current_user["email"]
+            "id": uid,
+            "name": name,
+            "email": email
         }
     }
 

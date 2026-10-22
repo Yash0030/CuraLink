@@ -100,7 +100,7 @@ class CheckerAgent:
                 decision_reason = legit_res["reasons"][0]
             elif code == "not_pdf":
                 decision = "reject"
-                decision_reason = "Corrupt or non-PDF file: does not contain valid %PDF header (TC4)."
+                decision_reason = "Corrupt or non-PDF file: does not contain valid %PDF header."
             elif code == "patient_id_mismatch":
                 decision = "reject"
                 decision_reason = legit_res["reasons"][0]

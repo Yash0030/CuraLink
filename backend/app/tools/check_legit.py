@@ -101,7 +101,7 @@ def check_file_legit(
         return {
             "verdict": "fail",
             "code": "not_pdf",
-            "reasons": ["File does not start with %PDF magic header (TC4)."],
+            "reasons": ["File does not start with valid %PDF header."],
             "evidence": evidence,
             "name_score": 0.0
         }
