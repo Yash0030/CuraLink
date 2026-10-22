@@ -9,9 +9,8 @@ import type {
   UserProfile,
   AuthResponse
 } from './types';
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-
+const rawApiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+export const API_BASE = rawApiBase.replace(/\/+$/, '');
 export function getAuthToken(): string | null {
   return localStorage.getItem('phr_auth_token');
 }

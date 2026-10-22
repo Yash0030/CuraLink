@@ -106,8 +106,14 @@ app.mount("/portal", mock_portal_app)
 # Request logging middleware for comprehensive visibility
 @app.middleware("http")
 async def log_requests_middleware(request: Request, call_next):
+    # Normalize duplicate consecutive slashes in URL path (e.g. //api/labs -> /api/labs)
+    raw_path = request.scope.get("path", "")
+    if "//" in raw_path:
+        import re
+        request.scope["path"] = re.sub(r"/+", "/", raw_path)
+
     start_time = datetime.now()
-    path = request.url.path
+    path = request.scope["path"]
     method = request.method
     # Skip verbose logging for high-frequency poll endpoints to keep terminal clean
     is_poll = path.endswith("/events") or path.endswith("/candidates") or path.endswith("/health")
@@ -283,6 +289,16 @@ async def logout(request: Request):
         token = auth_header.replace("Bearer ", "").strip()
         await Repository.delete_session(token)
     return {"status": "logged_out"}
+
+@app.get("/")
+async def root():
+    """Root endpoint for status check."""
+    return {
+        "status": "online",
+        "service": "CuraLink Backend API",
+        "docs": "/docs",
+        "health": "/health"
+    }
 
 @app.get("/health")
 async def health_check():
