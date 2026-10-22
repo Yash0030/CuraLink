@@ -44,12 +44,11 @@ class Settings(BaseSettings):
 
     @property
     def direct_checkpoint_url(self) -> Optional[str]:
-        """Derives direct Postgres URL for LangGraph checkpointer by stripping '-pooler' from pooled URL."""
-        if self.CHECKPOINT_DATABASE_URL:
-            return self.CHECKPOINT_DATABASE_URL
-        if self.DATABASE_URL:
-            # Strip -pooler as required by Neon rules
-            return self.DATABASE_URL.replace("-pooler", "")
+        """Derives direct Postgres URL for LangGraph checkpointer by stripping '-pooler'."""
+        url = self.CHECKPOINT_DATABASE_URL or self.DATABASE_URL
+        if url:
+            # Neon requires direct connection (no PgBouncer pooler) for checkpoints
+            return url.replace("-pooler", "")
         return None
 
 settings = Settings()

@@ -45,7 +45,7 @@ from app.db.repository import Repository
 from app.tools.captcha_manager import CaptchaManager
 from app.portal_selectors import PORTAL_CONFIG
 from app.graph.state import HealthRecordGraphState
-from app.graph.checkpointer import get_checkpointer
+from app.graph.checkpointer import get_checkpointer, close_checkpointer
 from app.graph.workflow import (
     create_health_record_graph,
     set_transient_credentials,
@@ -70,6 +70,7 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("Shutting down backend and closing database pools...")
     await close_pool()
+    await close_checkpointer()
 
 app = FastAPI(
     title="Personal Health Record Organizer API",
