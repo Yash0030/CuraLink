@@ -1,12 +1,58 @@
 -- Personal Health Record Organizer Database Schema
 -- Compatible with Neon Postgres / PostgreSQL 14+
+-- All tables are completely isolated inside the 'phr' schema
+
+-- 0. Schema Creation and Path Setup
+CREATE SCHEMA IF NOT EXISTS phr;
+SET search_path TO phr, public;
 
 -- Enable uuid generation if available
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- 1. runs table: Orchestration and patient run metadata
-CREATE TABLE IF NOT EXISTS runs (
+-- 1. users table: User accounts and authentication (isolated in phr)
+CREATE TABLE IF NOT EXISTS phr.users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_phr_users_email ON phr.users(email);
+
+-- 2. auth_sessions table: User session tokens (isolated in phr)
+CREATE TABLE IF NOT EXISTS phr.auth_sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES phr.users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_phr_auth_sessions_user_id ON phr.auth_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_phr_auth_sessions_expires_at ON phr.auth_sessions(expires_at);
+
+-- 3. user_labs table: Custom lab portals configured by users (isolated in phr)
+CREATE TABLE IF NOT EXISTS phr.user_labs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES phr.users(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    username TEXT DEFAULT '',
+    password TEXT DEFAULT '',
+    layout TEXT NOT NULL DEFAULT 'table',
+    has_captcha BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_phr_user_lab_key UNIQUE (user_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_phr_user_labs_user_id ON phr.user_labs(user_id);
+
+-- 4. runs table: Orchestration and patient run metadata (isolated in phr)
+CREATE TABLE IF NOT EXISTS phr.runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES phr.users(id) ON DELETE CASCADE,
     patient_name TEXT NOT NULL,
     patient_id TEXT,
     patient_key TEXT NOT NULL,
@@ -19,14 +65,15 @@ CREATE TABLE IF NOT EXISTS runs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_runs_patient_key ON runs(patient_key);
-CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
-CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_phr_runs_user_id ON phr.runs(user_id);
+CREATE INDEX IF NOT EXISTS idx_phr_runs_patient_key ON phr.runs(patient_key);
+CREATE INDEX IF NOT EXISTS idx_phr_runs_status ON phr.runs(status);
+CREATE INDEX IF NOT EXISTS idx_phr_runs_created_at ON phr.runs(created_at DESC);
 
--- 2. candidates table: Downloaded files and staging area
-CREATE TABLE IF NOT EXISTS candidates (
+-- 5. candidates table: Downloaded files and staging area (isolated in phr)
+CREATE TABLE IF NOT EXISTS phr.candidates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    run_id UUID NOT NULL REFERENCES phr.runs(id) ON DELETE CASCADE,
     lab TEXT NOT NULL,
     filename TEXT NOT NULL,
     source_url TEXT,
@@ -63,38 +110,39 @@ CREATE TABLE IF NOT EXISTS candidates (
     recheck_ok BOOLEAN,
     recheck_note TEXT,
     
-    CONSTRAINT uq_run_lab_filename UNIQUE (run_id, lab, filename)
+    CONSTRAINT uq_phr_run_lab_filename UNIQUE (run_id, lab, filename)
 );
 
-CREATE INDEX IF NOT EXISTS idx_candidates_run_id ON candidates(run_id);
-CREATE INDEX IF NOT EXISTS idx_candidates_decision ON candidates(decision);
-CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status);
-CREATE INDEX IF NOT EXISTS idx_candidates_sha256 ON candidates(sha256);
+CREATE INDEX IF NOT EXISTS idx_phr_candidates_run_id ON phr.candidates(run_id);
+CREATE INDEX IF NOT EXISTS idx_phr_candidates_decision ON phr.candidates(decision);
+CREATE INDEX IF NOT EXISTS idx_phr_candidates_status ON phr.candidates(status);
+CREATE INDEX IF NOT EXISTS idx_phr_candidates_sha256 ON phr.candidates(sha256);
 
--- 3. reports table: The permanent medical timeline record
-CREATE TABLE IF NOT EXISTS reports (
+-- 6. reports table: The permanent medical timeline record (isolated in phr)
+CREATE TABLE IF NOT EXISTS phr.reports (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    candidate_id UUID REFERENCES candidates(id) ON DELETE SET NULL,
+    user_id UUID REFERENCES phr.users(id) ON DELETE CASCADE,
+    candidate_id UUID REFERENCES phr.candidates(id) ON DELETE SET NULL,
     patient_key TEXT NOT NULL,
     lab TEXT NOT NULL,
     report_id TEXT NOT NULL,
     test_name TEXT NOT NULL,
     report_date DATE NOT NULL,
     sha256 TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    
-    CONSTRAINT uq_reports_patient_report_id UNIQUE (patient_key, report_id),
-    CONSTRAINT uq_reports_patient_sha256 UNIQUE (patient_key, sha256)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_reports_patient_key ON reports(patient_key);
-CREATE INDEX IF NOT EXISTS idx_reports_report_date ON reports(report_date DESC);
-CREATE INDEX IF NOT EXISTS idx_reports_lab ON reports(lab);
+CREATE INDEX IF NOT EXISTS idx_phr_reports_user_id ON phr.reports(user_id);
+CREATE INDEX IF NOT EXISTS idx_phr_reports_patient_key ON phr.reports(patient_key);
+CREATE INDEX IF NOT EXISTS idx_phr_reports_report_date ON phr.reports(report_date DESC);
+CREATE INDEX IF NOT EXISTS idx_phr_reports_lab ON phr.reports(lab);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_phr_reports_user_sha256 ON phr.reports (COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid), sha256);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_phr_reports_user_lab_report ON phr.reports (COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid), lab, report_id);
 
--- 4. events table: Live log and audit trail
-CREATE TABLE IF NOT EXISTS events (
+-- 7. events table: Live log and audit trail (isolated in phr)
+CREATE TABLE IF NOT EXISTS phr.events (
     id BIGSERIAL PRIMARY KEY,
-    run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    run_id UUID NOT NULL REFERENCES phr.runs(id) ON DELETE CASCADE,
     agent TEXT NOT NULL,
     level TEXT NOT NULL DEFAULT 'INFO', -- 'DEBUG', 'INFO', 'WARNING', 'ERROR'
     message TEXT NOT NULL,
@@ -102,16 +150,16 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_run_id_id ON events(run_id, id);
-CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
+CREATE INDEX IF NOT EXISTS idx_phr_events_run_id_id ON phr.events(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_phr_events_created_at ON phr.events(created_at);
 
--- 5. approvals table: Human-in-the-loop decisions and overrides
-CREATE TABLE IF NOT EXISTS approvals (
+-- 8. approvals table: Human-in-the-loop decisions and overrides (isolated in phr)
+CREATE TABLE IF NOT EXISTS phr.approvals (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    run_id UUID NOT NULL REFERENCES phr.runs(id) ON DELETE CASCADE,
     approved BOOLEAN NOT NULL DEFAULT FALSE,
     overrides JSONB, -- key: candidate_id, value: 'keep' | 'skip'
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals(run_id);
+CREATE INDEX IF NOT EXISTS idx_phr_approvals_run_id ON phr.approvals(run_id);

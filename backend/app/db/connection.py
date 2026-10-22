@@ -8,6 +8,13 @@ Implements:
 """
 
 import os
+import sys
+import asyncio
+if sys.platform == "win32":
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
 import json
 import logging
 from typing import AsyncGenerator, Optional, Dict, Any, List

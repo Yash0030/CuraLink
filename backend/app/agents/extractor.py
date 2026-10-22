@@ -210,6 +210,7 @@ class ExtractorAgent:
             return {"extract_ok": False, "reason": read_res["reason"]}
 
         raw_text = read_res["text"]
+        logger.info(f"[Extractor] Read '{filename}' ({len(raw_text)} chars of extracted text, {read_res.get('page_count', 1)} pages).")
 
         # Step 1: Regex extraction
         regex_res = extract_with_regex(raw_text)
@@ -221,6 +222,8 @@ class ExtractorAgent:
         report_id = regex_res["report_id"] or candidate.get("portal_report_id")
         doc_date = regex_res["date"]
         test = regex_res["test"] or candidate.get("listing_title")
+
+        logger.info(f"[Extractor] Regex extraction for '{filename}': Name='{name}', Date='{doc_date}', ID='{report_id}', Test='{test}'")
 
         # Step 2: LLM fallback ONLY when name or date is missing
         if not name or not doc_date:

@@ -15,14 +15,26 @@ Endpoints:
 - GET /api/files/{candidate_id} (streams PDF)
 """
 
-import io
+import sys
 import asyncio
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+import io
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Response, Query, BackgroundTasks, Depends
+from fastapi import FastAPI, HTTPException, Response, Query, BackgroundTasks, Depends, Request
+from app.auth import (
+    hash_password,
+    verify_password,
+    generate_session_token,
+    hash_token,
+    get_current_user,
+    get_current_user_optional
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -62,31 +74,80 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Personal Health Record Organizer API",
     description="Local Agentic AI Health Record Organizer for Ziro Hackathon 2026",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan
 )
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins_list,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+        "http://localhost:5175",
+        "http://127.0.0.1:5175",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        *settings.cors_origins_list,
+    ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Mount Mock Portal under root paths if requested, and under /portal for convenience
+# Include Mock Portal router directly so /{lab}/login, /{lab}/reports, and /{lab}/download/{filename}
+# are served directly from the root of the FastAPI server without mounting path discrepancies.
+app.include_router(mock_portal_app.router)
 app.mount("/portal", mock_portal_app)
-# Mount individual lab portals directly for local testing convenience
-for lab_key in ("labA", "labB", "labC"):
-    app.mount(f"/{lab_key}", mock_portal_app)
+
+# Request logging middleware for comprehensive visibility
+@app.middleware("http")
+async def log_requests_middleware(request: Request, call_next):
+    start_time = datetime.now()
+    path = request.url.path
+    method = request.method
+    # Skip verbose logging for high-frequency poll endpoints to keep terminal clean
+    is_poll = path.endswith("/events") or path.endswith("/candidates") or path.endswith("/health")
+
+    if not is_poll:
+        logger.info(f"--> [{method}] {path}")
+
+    try:
+        response = await call_next(request)
+        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+        if not is_poll or response.status_code >= 400:
+            logger.info(f"<-- [{method}] {path} completed with status {response.status_code} ({duration_ms:.1f}ms)")
+        return response
+    except Exception as e:
+        duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+        logger.error(f"<-- [{method}] {path} failed with exception after {duration_ms:.1f}ms: {e}", exc_info=True)
+        raise
 
 # --- Pydantic Schemas ---
 
+class UserSignUpRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+class UserLoginRequest(BaseModel):
+    email: str
+    password: str
+
+class AddLabRequest(BaseModel):
+    name: str
+    url: str
+    username: str = ""
+    password: str = ""
+    layout: str = "table"
+
 class LabLoginInfo(BaseModel):
     enabled: bool = True
-    username: str = "pt001"
-    password: str = "demo123"
+    username: str = ""
+    password: str = ""
 
 class CreateRunRequest(BaseModel):
     patient_name: str
@@ -106,7 +167,8 @@ class ApproveRunRequest(BaseModel):
 # --- Background Graph Runner ---
 
 async def execute_run_workflow(run_id: str, initial_state: HealthRecordGraphState):
-    """Executes the compiled LangGraph workflow asynchronously."""
+    """Executes the compiled LangGraph workflow asynchronously with rich progress logging."""
+    logger.info(f"[Run {run_id}] Initializing workflow for patient '{initial_state.patient_name}' across labs: {initial_state.labs}")
     checkpointer = await get_checkpointer()
     workflow_graph = create_health_record_graph()
     app_graph = workflow_graph.compile(checkpointer=checkpointer)
@@ -114,21 +176,107 @@ async def execute_run_workflow(run_id: str, initial_state: HealthRecordGraphStat
     thread_config = {"configurable": {"thread_id": run_id}}
     _RUNNING_GRAPH_THREADS[run_id] = {
         "graph": app_graph,
-        "config": thread_config
+        "config": thread_config,
+        "task": asyncio.current_task()
     }
 
     try:
-        # Run graph until interrupt or completion
+        logger.info(f"[Run {run_id}] Streaming LangGraph execution...")
         async for chunk in app_graph.astream(initial_state.model_dump(), thread_config):
-            logger.info(f"[Run {run_id}] Graph progress chunk: {list(chunk.keys())}")
+            for node_name, update in chunk.items():
+                keys = list(update.keys()) if isinstance(update, dict) else type(update)
+                logger.info(f"[Run {run_id}] Node completed: [{node_name}] -> yielded: {keys}")
+        logger.info(f"[Run {run_id}] Stream paused or ended (e.g. reached human_approval interrupt or completion).")
+    except asyncio.CancelledError:
+        logger.info(f"[Run {run_id}] LangGraph execution task was cancelled.")
+        await Repository.update_run_status(run_id, "cancelled", "Cancelled by user")
+        await Repository.record_event(run_id, "Orchestrator", "WARNING", "Collection run was cancelled by user.")
+        raise
     except Exception as e:
         logger.error(f"[Run {run_id}] Graph execution error: {e}", exc_info=True)
         await Repository.update_run_status(run_id, "failed", str(e))
         await Repository.record_event(run_id, "Orchestrator", "ERROR", f"Graph execution failed: {e}")
     finally:
         wipe_transient_credentials(run_id)
+        run_record = await Repository.get_run(run_id)
+        if run_record and run_record.get("status") in ("failed", "cancelled", "completed", "rejected_by_human"):
+            _RUNNING_GRAPH_THREADS.pop(run_id, None)
 
 # --- API Endpoints ---
+
+# 1. Authentication Endpoints
+@app.post("/api/auth/signup")
+async def signup(req: UserSignUpRequest):
+    """Registers a new user account with secure bcrypt hashing."""
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="Full name is required")
+    if not req.email.strip() or "@" not in req.email:
+        raise HTTPException(status_code=400, detail="Valid email address is required")
+    if len(req.password) < 4:
+        raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+
+    existing = await Repository.get_user_by_email(req.email)
+    if existing:
+        raise HTTPException(status_code=400, detail="An account with this email already exists")
+
+    pw_hash = hash_password(req.password)
+    user = await Repository.create_user(req.name.strip(), req.email.strip(), pw_hash)
+
+    token = generate_session_token()
+    token_h = hash_token(token)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+    await Repository.create_session(user["id"], token_h, expires_at)
+
+    return {
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "name": user["name"],
+            "email": user["email"]
+        }
+    }
+
+@app.post("/api/auth/login")
+async def login(req: UserLoginRequest):
+    """Authenticates user and creates a secure 30-day session token."""
+    clean_email = req.email.strip()
+    user = await Repository.get_user_by_email(clean_email)
+    if not user or not verify_password(req.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    token = generate_session_token()
+    token_h = hash_token(token)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+    await Repository.create_session(str(user["id"]), token_h, expires_at)
+
+    return {
+        "token": token,
+        "user": {
+            "id": str(user["id"]),
+            "name": user["name"],
+            "email": user["email"]
+        }
+    }
+
+@app.get("/api/auth/me")
+async def get_me(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Returns the authenticated user's profile."""
+    return {
+        "user": {
+            "id": str(current_user["id"]),
+            "name": current_user["name"],
+            "email": current_user["email"]
+        }
+    }
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    """Logs out user and invalidates current session token."""
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.replace("Bearer ", "").strip()
+        await Repository.delete_session(token)
+    return {"status": "logged_out"}
 
 @app.get("/health")
 async def health_check():
@@ -144,8 +292,8 @@ async def health_check():
     }
 
 @app.get("/api/labs")
-async def list_labs():
-    """Returns metadata and configurations for all supported lab portals."""
+async def list_labs(current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
+    """Returns metadata and configurations for all supported lab portals including custom labs."""
     labs_list = []
     for key, cfg in PORTAL_CONFIG.items():
         labs_list.append({
@@ -153,21 +301,79 @@ async def list_labs():
             "name": cfg["name"],
             "layout": cfg["layout"],
             "has_captcha": cfg["has_captcha"],
-            "reports_path": cfg["reports_path"]
+            "reports_path": cfg["reports_path"],
+            "is_custom": False
         })
+
+    if current_user:
+        user_labs = await Repository.get_user_labs(current_user["id"])
+        for ul in user_labs:
+            labs_list.append({
+                "key": ul["key"],
+                "name": ul["name"],
+                "layout": ul.get("layout", "table"),
+                "has_captcha": ul.get("has_captcha", False),
+                "reports_path": ul.get("url", ""),
+                "url": ul.get("url", ""),
+                "is_custom": True,
+                "default_username": ul.get("username", ""),
+                "default_password": ul.get("password", "")
+            })
+
     return labs_list
 
+@app.post("/api/labs")
+async def add_lab(req: AddLabRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Adds a new custom lab portal for the authenticated user."""
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="Lab name is required")
+    if not req.url.strip():
+        raise HTTPException(status_code=400, detail="Portal URL is required")
+
+    created = await Repository.create_user_lab(
+        user_id=str(current_user["id"]),
+        name=req.name.strip(),
+        url=req.url.strip(),
+        username=req.username.strip(),
+        password=req.password.strip(),
+        layout=req.layout
+    )
+    return created
+
+@app.delete("/api/labs/{lab_key}")
+async def delete_lab(lab_key: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Deletes a custom lab portal created by the user."""
+    if lab_key in PORTAL_CONFIG:
+        raise HTTPException(status_code=400, detail="Cannot delete default system lab portals")
+
+    deleted = await Repository.delete_user_lab(str(current_user["id"]), lab_key)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Custom lab not found or not owned by you")
+    return {"status": "deleted", "key": lab_key}
+
 @app.post("/api/runs")
-async def create_run(req: CreateRunRequest, background_tasks: BackgroundTasks):
+async def create_run(
+    req: CreateRunRequest,
+    background_tasks: BackgroundTasks,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
     """Creates a new collection run and launches parallel fetchers."""
     # Validate date range
     if req.date_from > req.date_to:
         raise HTTPException(status_code=400, detail="date_from cannot be after date_to")
 
+    user_id = str(current_user["id"]) if current_user else None
+
+    # Discover allowed lab keys
+    valid_keys = set(PORTAL_CONFIG.keys())
+    if user_id:
+        user_custom_labs = await Repository.get_user_labs(user_id)
+        valid_keys.update(l["key"] for l in user_custom_labs)
+
     # Filter enabled labs
     selected_labs = [
         lab for lab, cred in req.logins.items()
-        if cred.enabled and lab in PORTAL_CONFIG
+        if cred.enabled and lab in valid_keys
     ]
     if not selected_labs:
         raise HTTPException(status_code=400, detail="At least one lab portal must be selected.")
@@ -178,7 +384,8 @@ async def create_run(req: CreateRunRequest, background_tasks: BackgroundTasks):
         patient_id=req.patient_id.strip() if req.patient_id else None,
         date_from=req.date_from,
         date_to=req.date_to,
-        labs=selected_labs
+        labs=selected_labs,
+        user_id=user_id
     )
     run_id = run_record["id"]
 
@@ -192,6 +399,7 @@ async def create_run(req: CreateRunRequest, background_tasks: BackgroundTasks):
     # 3. Initialize Graph State
     initial_state = HealthRecordGraphState(
         run_id=run_id,
+        user_id=user_id,
         patient_name=req.patient_name.strip(),
         patient_id=req.patient_id.strip() if req.patient_id else None,
         patient_key=run_record["patient_key"],
@@ -212,9 +420,10 @@ async def create_run(req: CreateRunRequest, background_tasks: BackgroundTasks):
     }
 
 @app.get("/api/runs")
-async def get_all_runs():
-    """Returns list of past and active runs."""
-    return await Repository.list_runs()
+async def get_all_runs(current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
+    """Returns list of past and active runs scoped to user."""
+    user_id = str(current_user["id"]) if current_user else None
+    return await Repository.list_runs(user_id=user_id)
 
 @app.get("/api/runs/{run_id}")
 async def get_run_details(run_id: str):
@@ -284,63 +493,188 @@ async def submit_captcha(run_id: str, lab: str, req: CaptchaSubmitRequest):
     """Relays human CAPTCHA answer or live-view solve signal."""
     if req.solved_live:
         success = CaptchaManager.submit_solved_live(run_id, lab)
+        action_msg = f"User solved CAPTCHA challenge in live view for {lab.upper()}."
     elif req.answer:
         success = CaptchaManager.submit_answer(run_id, lab, req.answer.strip())
+        action_msg = f"User submitted CAPTCHA answer for {lab.upper()}."
     else:
         raise HTTPException(status_code=400, detail="Either answer or solved_live must be provided.")
 
     if not success:
         raise HTTPException(status_code=404, detail="No active CAPTCHA session waiting for this lab.")
 
+    await Repository.record_event(run_id, "User", "INFO", action_msg)
     return {"status": "relayed", "lab": lab}
 
 @app.post("/api/runs/{run_id}/approve")
 async def approve_run(run_id: str, req: ApproveRunRequest):
     """Human approval submission: resumes LangGraph execution to store and re-check records."""
-    run = await Repository.get_run(run_id)
+    try:
+        run = await Repository.get_run(run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found in database.")
+
+        # Record detailed user actions for the activity log
+        candidates = await Repository.get_candidates_for_run(run_id)
+        if not req.approved:
+            await Repository.record_event(
+                run_id, "User", "WARNING",
+                f"User rejected collection run approval. All {len(candidates)} reports were discarded."
+            )
+        else:
+            accepted_count = 0
+            rejected_count = 0
+            for c in candidates:
+                cid = str(c["id"])
+                name = c.get("x_test") or c.get("listing_title") or c.get("filename")
+                override = req.overrides.get(cid)
+                if override in ("keep", "accept"):
+                    accepted_count += 1
+                    await Repository.record_event(run_id, "User", "INFO", f"User manually accepted '{name}' ({c.get('filename')}) via override.")
+                elif override in ("skip", "reject", "exclude"):
+                    rejected_count += 1
+                    await Repository.record_event(run_id, "User", "WARNING", f"User manually rejected '{name}' ({c.get('filename')}) via override.")
+                else:
+                    dec = c.get("decision")
+                    if dec == "keep":
+                        accepted_count += 1
+                        await Repository.record_event(run_id, "User", "INFO", f"User confirmed acceptance of '{name}' ({c.get('filename')}).")
+                    else:
+                        rejected_count += 1
+                        await Repository.record_event(run_id, "User", "INFO", f"User confirmed exclusion of '{name}' ({c.get('filename')}) [{dec}].")
+            
+            await Repository.record_event(
+                run_id, "User", "INFO",
+                f"User approved collection run: {accepted_count} report(s) accepted, {rejected_count} report(s) excluded/rejected."
+            )
+
+        thread_info = _RUNNING_GRAPH_THREADS.get(run_id)
+        checkpointer = await get_checkpointer()
+
+        # Rebuild state from DB if server restarted while waiting for approval
+        state = await rebuild_run_context(run_id)
+        if not state:
+            raise HTTPException(status_code=500, detail="Could not rebuild run context.")
+
+        state.approved = req.approved
+        state.overrides = req.overrides
+
+        # Record approval in DB
+        await Repository.record_approval(run_id, req.approved, req.overrides)
+
+        # If LangGraph app thread is waiting at interrupt, resume it and await completion:
+        if thread_info:
+            try:
+                from langgraph.types import Command
+                app_graph = thread_info["graph"]
+                config = thread_info["config"]
+                resume_cmd = Command(resume={"approved": req.approved, "overrides": req.overrides})
+                await app_graph.ainvoke(resume_cmd, config)
+                _RUNNING_GRAPH_THREADS.pop(run_id, None)
+                return {"status": "completed", "approved": req.approved}
+            except Exception as e:
+                logger.warning(f"Error resuming graph via Command: {e}. Executing sequential completion.")
+
+        # Direct execution of remaining steps (store -> recheck -> build_timeline)
+        if req.approved:
+            store_res = await store(state)
+            state.stored_count = store_res.get("stored_count", 0)
+            await recheck_saved_files(state)
+            await build_timeline(state)
+        else:
+            await Repository.update_run_status(run_id, "rejected_by_human")
+
+        _RUNNING_GRAPH_THREADS.pop(run_id, None)
+        return {"status": "completed", "approved": req.approved}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in approve_run: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Approval execution failed: {str(e)}")
+
+class BatchDeleteRunsRequest(BaseModel):
+    run_ids: Optional[List[str]] = None
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str, current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
+    """Cancels an active or waiting collection run and safely unblocks pending CAPTCHAs."""
+    user_id = str(current_user["id"]) if current_user else None
+    run = await Repository.get_run(run_id, user_id=user_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    thread_info = _RUNNING_GRAPH_THREADS.get(run_id)
-    checkpointer = await get_checkpointer()
+    # Cancel any waiting CAPTCHA challenges immediately
+    CaptchaManager.cancel_run_captchas(run_id)
 
-    # Rebuild state from DB if server restarted while waiting for approval
-    state = await rebuild_run_context(run_id)
-    if not state:
-        raise HTTPException(status_code=500, detail="Could not rebuild run context.")
-
-    state.approved = req.approved
-    state.overrides = req.overrides
-
-    # If LangGraph app thread is waiting at interrupt, resume it:
+    # Cancel running background graph thread if still active
+    thread_info = _RUNNING_GRAPH_THREADS.pop(run_id, None)
     if thread_info:
-        try:
-            from langgraph.types import Command
-            app_graph = thread_info["graph"]
-            config = thread_info["config"]
-            resume_cmd = Command(resume={"approved": req.approved, "overrides": req.overrides})
-            # Resume graph stream in background task
-            asyncio.create_task(app_graph.ainvoke(resume_cmd, config))
-            return {"status": "resumed", "approved": req.approved}
-        except Exception as e:
-            logger.warning(f"Error resuming graph via Command: {e}. Executing sequential completion.")
+        task = thread_info.get("task")
+        if task and not task.done():
+            task.cancel()
 
-    # Fallback direct execution of remaining steps (store -> recheck -> build_timeline)
-    await Repository.record_approval(run_id, req.approved, req.overrides)
-    if req.approved:
-        store_res = await store(state)
-        state.stored_count = store_res.get("stored_count", 0)
-        await recheck_saved_files(state)
-        await build_timeline(state)
+    # Mark status as cancelled in database
+    await Repository.update_run_status(run_id, "cancelled", "Cancelled by user")
+    await Repository.record_event(run_id, "User", "WARNING", "User cancelled the collection run.")
+    wipe_transient_credentials(run_id)
+
+    return {"status": "cancelled", "run_id": run_id}
+
+@app.delete("/api/runs/{run_id}")
+async def delete_single_run(run_id: str, current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
+    """Deletes a run and all associated staging candidates and events."""
+    user_id = str(current_user["id"]) if current_user else None
+
+    # If currently active, unblock and cancel
+    CaptchaManager.cancel_run_captchas(run_id)
+    thread_info = _RUNNING_GRAPH_THREADS.pop(run_id, None)
+    if thread_info:
+        task = thread_info.get("task")
+        if task and not task.done():
+            task.cancel()
+    wipe_transient_credentials(run_id)
+
+    deleted = await Repository.delete_run(run_id, user_id=user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Run not found or already deleted")
+    return {"status": "deleted", "run_id": run_id}
+
+@app.delete("/api/runs")
+@app.post("/api/runs/delete")
+async def delete_runs(
+    req: Optional[BatchDeleteRunsRequest] = None,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    """Deletes selected runs or all past runs for the user."""
+    user_id = str(current_user["id"]) if current_user else None
+
+    if req and req.run_ids:
+        for rid in req.run_ids:
+            CaptchaManager.cancel_run_captchas(rid)
+            t_info = _RUNNING_GRAPH_THREADS.pop(rid, None)
+            if t_info and t_info.get("task") and not t_info["task"].done():
+                t_info["task"].cancel()
+            wipe_transient_credentials(rid)
+        count = await Repository.delete_runs(req.run_ids, user_id=user_id)
     else:
-        await Repository.update_run_status(run_id, "rejected_by_human")
+        for rid in list(_RUNNING_GRAPH_THREADS.keys()):
+            CaptchaManager.cancel_run_captchas(rid)
+            t_info = _RUNNING_GRAPH_THREADS.pop(rid, None)
+            if t_info and t_info.get("task") and not t_info["task"].done():
+                t_info["task"].cancel()
+            wipe_transient_credentials(rid)
+        count = await Repository.clear_all_runs(user_id=user_id)
 
-    return {"status": "completed", "approved": req.approved}
+    return {"status": "deleted", "count": count}
 
 @app.get("/api/timeline")
-async def get_timeline(patient_key: Optional[str] = None):
-    """Returns the unified, dated, indexed health timeline."""
-    return await Repository.get_timeline(patient_key)
+async def get_timeline(
+    patient_key: Optional[str] = None,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    """Returns the unified, dated, indexed health timeline scoped to user."""
+    user_id = str(current_user["id"]) if current_user else None
+    return await Repository.get_timeline(patient_key, user_id=user_id)
 
 @app.get("/api/files/{candidate_id}")
 async def get_candidate_file(candidate_id: str):

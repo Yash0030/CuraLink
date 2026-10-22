@@ -137,3 +137,35 @@ async def test_api_e2e_lifecycle():
         assert res_file.status_code == 200
         assert res_file.headers["content-type"] == "application/pdf"
         assert res_file.content.startswith(b"%PDF")
+
+@pytest.mark.asyncio
+async def test_cancel_and_delete_runs():
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Create a test run
+        run_data = await Repository.create_run(
+            patient_name="Cancel Test",
+            patient_id="pt999",
+            date_from=date(2026, 1, 1),
+            date_to=date(2026, 1, 31),
+            labs=["labA"]
+        )
+        run_id = run_data["id"]
+
+        # Cancel the run
+        res_cancel = await client.post(f"/api/runs/{run_id}/cancel")
+        assert res_cancel.status_code == 200
+        assert res_cancel.json()["status"] == "cancelled"
+
+        # Verify DB status is cancelled
+        run_check = await Repository.get_run(run_id)
+        assert run_check["status"] == "cancelled"
+
+        # Delete the single run
+        res_del = await client.delete(f"/api/runs/{run_id}")
+        assert res_del.status_code == 200
+        assert res_del.json()["status"] == "deleted"
+
+        # Verify it's gone
+        run_after = await Repository.get_run(run_id)
+        assert run_after is None

@@ -5,7 +5,6 @@ Implements the single Next.js-style site serving:
 - labA (A1): Table layout, no CAPTCHA.
 - labB (CityScan Imaging): Card layout, displays mock CAPTCHA modal.
 - labC (Vitals): Paginated list layout (3 per page), displays mock CAPTCHA modal.
-- Demo logins: pt001... with password demo123.
 - Generates synthetic test PDFs for downloads on-demand.
 """
 
@@ -92,14 +91,14 @@ async def login_page(lab: str):
         <div class="card">
             <h2>{lab_name}</h2>
             <p style="font-size: 13px; color: #64748b;">Sign in to view your diagnostic reports</p>
-            <form id="login-form" onsubmit="handleLoginSubmit(event)">
+            <form id="login-form" onsubmit="handleLoginSubmit(event)" autocomplete="off">
                 <div class="form-group">
                     <label for="username">Patient ID / Username</label>
-                    <input type="text" id="username" name="username" value="pt001" required />
+                    <input type="text" id="username" name="username" placeholder="Username" required autocomplete="off" />
                 </div>
                 <div class="form-group">
                     <label for="password">Password</label>
-                    <input type="password" id="password" name="password" value="demo123" required />
+                    <input type="password" id="password" name="password" placeholder="Password" required autocomplete="new-password" />
                 </div>
                 <button type="submit" id="login-btn">Log In</button>
 

@@ -86,6 +86,8 @@ class CheckerAgent:
             date_to=date_to
         )
 
+        logger.info(f"[Checker] File '{filename}' -> Legitimacy: verdict={legit_res['verdict']} (name_score={legit_res.get('name_score', 0):.2f}, code={legit_res.get('code')})")
+
         decision = None
         decision_reason = None
         duplicate_res = {"verdict": "skipped", "reason": "Not evaluated due to legitimacy failure"}
@@ -124,6 +126,8 @@ class CheckerAgent:
             )
 
             dup_verdict = duplicate_res["verdict"]
+            logger.info(f"[Checker] File '{filename}' -> Duplicate check: verdict={dup_verdict} ({duplicate_res.get('reason')})")
+
             if dup_verdict == "duplicate":
                 decision = "duplicate"
                 decision_reason = duplicate_res["reason"]
@@ -134,6 +138,8 @@ class CheckerAgent:
                 # Unique and passed legitimacy
                 decision = "keep"
                 decision_reason = "Verified authentic, matching patient, and unique."
+
+        logger.info(f"[Checker] Final verdict for '{filename}': [{decision.upper()}] - {decision_reason}")
 
         # Persist check results in candidate row
         await Repository.update_candidate_check(

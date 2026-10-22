@@ -31,8 +31,9 @@ async def get_checkpointer() -> Any:
         direct_url = settings.direct_checkpoint_url
         logger.info(f"Setting up AsyncPostgresSaver with direct URL: {direct_url.split('@')[-1] if '@' in direct_url else 'configured'}")
 
-        # Note: from_conn_string establishes async connection for checkpoints
-        saver = AsyncPostgresSaver.from_conn_string(direct_url)
+        # In langgraph-checkpoint-postgres, from_conn_string is an async context manager
+        cm = AsyncPostgresSaver.from_conn_string(direct_url)
+        saver = await cm.__aenter__()
         await saver.setup()
         _postgres_saver = saver
         logger.info("AsyncPostgresSaver successfully initialized and tables verified.")

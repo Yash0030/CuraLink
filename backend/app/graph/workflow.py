@@ -60,6 +60,7 @@ async def validate_inputs(state: HealthRecordGraphState) -> Dict[str, Any]:
 async def fetch_lab_worker(state: HealthRecordGraphState, lab: str) -> Dict[str, Any]:
     """Worker node for an individual lab fetcher."""
     if lab not in state.labs:
+        logger.info(f"[Node: {lab}] Lab not selected for run {state.run_id}. Skipping.")
         return {"fetch_summaries": {lab: 0}}
 
     creds = get_transient_credentials(state.run_id, lab)
@@ -68,6 +69,8 @@ async def fetch_lab_worker(state: HealthRecordGraphState, lab: str) -> Dict[str,
 
     date_from = date.fromisoformat(state.date_from)
     date_to = date.fromisoformat(state.date_to)
+
+    logger.info(f"[Node: {lab}] Initializing fetch worker for patient '{state.patient_name}' [{date_from} to {date_to}]...")
 
     agent = LabFetcherAgent(
         lab=lab,
@@ -81,7 +84,11 @@ async def fetch_lab_worker(state: HealthRecordGraphState, lab: str) -> Dict[str,
     try:
         res = await agent.run()
         staged_count = res.get("staged_count", 0)
+        logger.info(f"[Node: {lab}] Worker completed successfully. Staged count: {staged_count}")
         return {"fetch_summaries": {lab: staged_count}}
+    except Exception as e:
+        logger.error(f"[Node: {lab}] Worker encountered an error: {e}", exc_info=True)
+        return {"fetch_summaries": {lab: 0}}
     finally:
         # Wipe password in-memory as lab finishes
         wipe_transient_credentials(state.run_id, lab)
@@ -95,10 +102,23 @@ async def fetch_cityscan(state: HealthRecordGraphState) -> Dict[str, Any]:
 async def fetch_vitals(state: HealthRecordGraphState) -> Dict[str, Any]:
     return await fetch_lab_worker(state, "labC")
 
+async def fetch_custom_labs(state: HealthRecordGraphState) -> Dict[str, Any]:
+    """Worker node that executes custom user-configured lab fetchers."""
+    custom_labs = [lab for lab in state.labs if lab not in ("labA", "labB", "labC")]
+    if not custom_labs:
+        return {"fetch_summaries": {}}
+    summaries = {}
+    for clab in custom_labs:
+        res = await fetch_lab_worker(state, clab)
+        summaries.update(res.get("fetch_summaries", {}))
+    return {"fetch_summaries": summaries}
+
 async def join(state: HealthRecordGraphState) -> Dict[str, Any]:
     """Node 3: Gathers candidates staged in database from all fetch workers."""
+    logger.info(f"[Node: join] Collecting staged documents across all labs for run {state.run_id}...")
     candidates = await Repository.get_candidates_for_run(state.run_id)
-    cand_ids = [c["id"] for c in candidates]
+    cand_ids = [str(c["id"]) for c in candidates]
+    logger.info(f"[Node: join] Found {len(cand_ids)} candidate documents staged in database.")
 
     await Repository.update_run_status(state.run_id, "extracting_checking")
     await Repository.record_event(
@@ -115,8 +135,10 @@ async def extract_and_check(state: HealthRecordGraphState) -> Dict[str, Any]:
     date_from = date.fromisoformat(state.date_from)
     date_to = date.fromisoformat(state.date_to)
 
+    logger.info(f"[Node: extract_and_check] Starting verification for run {state.run_id} (Patient: {state.patient_name})...")
+
     # Load permanent stored reports from previous runs to detect cross-run duplicates
-    stored_reports = await Repository.get_stored_reports(state.patient_key)
+    stored_reports = await Repository.get_stored_reports(state.patient_key, user_id=state.user_id)
     earlier_valid_candidates = []
 
     counts = {
@@ -129,8 +151,12 @@ async def extract_and_check(state: HealthRecordGraphState) -> Dict[str, Any]:
 
     # Fetch fresh candidate rows from database
     candidates = await Repository.get_candidates_for_run(state.run_id)
+    logger.info(f"[Node: extract_and_check] Processing {len(candidates)} candidate documents...")
 
-    for cand in candidates:
+    for idx, cand in enumerate(candidates):
+        filename = cand.get("filename", "")
+        logger.info(f"[Node: extract_and_check] Doc #{idx+1}/{len(candidates)}: Processing '{filename}' (ID: {cand['id']})...")
+
         # 1. Extraction (Regex first, LLM fallback only if missing name/date, checks against raw text)
         await ExtractorAgent.process_candidate(cand, state.run_id)
 
@@ -150,12 +176,15 @@ async def extract_and_check(state: HealthRecordGraphState) -> Dict[str, Any]:
         )
 
         decision = check_res["decision"]
+        logger.info(f"[Node: extract_and_check] Doc #{idx+1} '{filename}' -> DECISION: [{decision.upper()}] ({check_res.get('decision_reason')})")
+
         if decision in counts:
             counts[decision] += 1
 
         if decision == "keep":
             earlier_valid_candidates.append(fresh_cand)
 
+    logger.info(f"[Node: extract_and_check] All candidates evaluated. Summary counts: {counts}. Transitioning to waiting_approval.")
     await Repository.update_run_status(state.run_id, "waiting_approval")
     await Repository.record_event(
         state.run_id, "Orchestrator", "INFO",
@@ -215,21 +244,22 @@ async def store(state: HealthRecordGraphState) -> Dict[str, Any]:
     stored_count = 0
 
     for cand in candidates:
-        cand_id = cand["id"]
+        cand_id = str(cand["id"])
         decision = cand.get("decision")
-        override = state.overrides.get(cand_id)
+        override = state.overrides.get(cand_id) or state.overrides.get(cand.get("id"))
 
         # Decision resolution logic:
+        # Check human override first (accept/keep vs reject/skip/exclude)
         should_store = False
-        if decision == "keep":
-            # Store unless explicitly skipped by human
-            should_store = (override != "skip")
-        elif decision == "needs_review":
-            # Only store if explicitly approved ("keep") by human
-            should_store = (override == "keep")
+        if override:
+            if override in ("keep", "accept"):
+                should_store = True
+            elif override in ("skip", "reject", "exclude"):
+                should_store = False
+            else:
+                should_store = (decision == "keep")
         else:
-            # duplicate, exclude, reject
-            should_store = False
+            should_store = (decision == "keep")
 
         if should_store:
             rep_date = cand.get("x_date") or cand.get("portal_date") or date.today()
@@ -240,7 +270,8 @@ async def store(state: HealthRecordGraphState) -> Dict[str, Any]:
                 report_id=cand.get("x_report_id") or cand.get("portal_report_id") or f"GEN-{cand_id[:8]}",
                 test_name=cand.get("x_test") or cand.get("listing_title") or "Diagnostic Report",
                 report_date=rep_date,
-                sha256=cand.get("sha256")
+                sha256=cand.get("sha256"),
+                user_id=state.user_id
             )
             if success:
                 stored_count += 1
@@ -311,7 +342,7 @@ async def recheck_saved_files(state: HealthRecordGraphState) -> Dict[str, Any]:
 
 async def build_timeline(state: HealthRecordGraphState) -> Dict[str, Any]:
     """Node 8: Compiles finalized dated health timeline."""
-    timeline = await Repository.get_timeline(state.patient_key)
+    timeline = await Repository.get_timeline(state.patient_key, user_id=state.user_id)
     await Repository.update_run_status(state.run_id, "completed")
     await Repository.record_event(
         state.run_id, "Orchestrator", "INFO",
@@ -332,6 +363,7 @@ def create_health_record_graph():
     workflow.add_node("fetch_a1", fetch_a1)
     workflow.add_node("fetch_cityscan", fetch_cityscan)
     workflow.add_node("fetch_vitals", fetch_vitals)
+    workflow.add_node("fetch_custom_labs", fetch_custom_labs)
     workflow.add_node("join", join)
     workflow.add_node("extract_and_check", extract_and_check)
     workflow.add_node("human_approval", human_approval)
@@ -343,15 +375,17 @@ def create_health_record_graph():
     # START -> validate_inputs
     workflow.add_edge(START, "validate_inputs")
 
-    # 3 Fetchers in parallel
+    # Fetchers in parallel
     workflow.add_edge("validate_inputs", "fetch_a1")
     workflow.add_edge("validate_inputs", "fetch_cityscan")
     workflow.add_edge("validate_inputs", "fetch_vitals")
+    workflow.add_edge("validate_inputs", "fetch_custom_labs")
 
     # Join
     workflow.add_edge("fetch_a1", "join")
     workflow.add_edge("fetch_cityscan", "join")
     workflow.add_edge("fetch_vitals", "join")
+    workflow.add_edge("fetch_custom_labs", "join")
 
     # Extract & Check
     workflow.add_edge("join", "extract_and_check")
@@ -387,14 +421,15 @@ async def rebuild_run_context(run_id: str) -> Optional[HealthRecordGraphState]:
             counts[dec] += 1
 
     return HealthRecordGraphState(
-        run_id=run["id"],
+        run_id=str(run["id"]),
+        user_id=str(run["user_id"]) if run.get("user_id") else None,
         patient_name=run["patient_name"],
-        patient_id=run.get("patient_id"),
+        patient_id=str(run["patient_id"]) if run.get("patient_id") else None,
         patient_key=run["patient_key"],
         date_from=str(run["date_from"]),
         date_to=str(run["date_to"]),
         labs=run.get("labs") or [],
-        candidate_ids=[c["id"] for c in candidates],
+        candidate_ids=[str(c["id"]) for c in candidates],
         decision_counts=counts,
         status=run.get("status", "pending")
     )

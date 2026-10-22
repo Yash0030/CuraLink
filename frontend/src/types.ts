@@ -1,9 +1,24 @@
+export interface UserProfile {
+  id: string;
+  name: string;
+  email: string;
+}
+
+export interface AuthResponse {
+  token: string;
+  user: UserProfile;
+}
+
 export interface LabInfo {
   key: string;
   name: string;
   layout: 'table' | 'cards' | 'paginated';
   has_captcha: boolean;
   reports_path: string;
+  url?: string;
+  is_custom?: boolean;
+  default_username?: string;
+  default_password?: string;
 }
 
 export interface LabLoginCredential {

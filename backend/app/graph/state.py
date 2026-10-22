@@ -4,20 +4,47 @@ Strict constraint: The state is small and holds only IDs, counts, approved statu
 and human overrides. NEVER put file bytes or passwords in state or checkpoints!
 """
 
-from typing import Dict, Any, List, Optional
-from pydantic import BaseModel, Field
+from typing import Dict, Any, List, Optional, Annotated
+from pydantic import BaseModel, Field, field_validator
+
+def merge_summaries(a: Optional[Dict[str, int]], b: Optional[Dict[str, int]]) -> Dict[str, int]:
+    """Combines parallel outputs from fetcher nodes."""
+    res = dict(a or {})
+    if b:
+        res.update(b)
+    return res
 
 class HealthRecordGraphState(BaseModel):
     run_id: str
     patient_name: str
     patient_id: Optional[str] = None
     patient_key: str
+    user_id: Optional[str] = None
     date_from: str  # ISO date string
     date_to: str    # ISO date string
     labs: List[str] = Field(default_factory=list)
 
-    # Summaries (IDs and counts only)
-    fetch_summaries: Dict[str, int] = Field(default_factory=dict) # lab -> staged_count
+    @field_validator("run_id", mode="before")
+    @classmethod
+    def coerce_run_id_to_str(cls, v):
+        return str(v)
+
+    @field_validator("user_id", "patient_id", mode="before")
+    @classmethod
+    def coerce_optional_id_to_str(cls, v):
+        if v is None:
+            return None
+        return str(v)
+
+    @field_validator("candidate_ids", mode="before")
+    @classmethod
+    def coerce_candidate_ids_to_str(cls, v):
+        if isinstance(v, list):
+            return [str(x) for x in v]
+        return v
+
+    # Summaries (IDs and counts only) - Annotated with reducer for parallel fan-in
+    fetch_summaries: Annotated[Dict[str, int], merge_summaries] = Field(default_factory=dict)
     candidate_ids: List[str] = Field(default_factory=list)
     decision_counts: Dict[str, int] = Field(default_factory=lambda: {
         "keep": 0,

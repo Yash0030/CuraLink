@@ -10,10 +10,16 @@ import hashlib
 from datetime import datetime, date, timezone
 from typing import Dict, Any, List, Optional
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.db.connection import get_db_pool
 
 # In-memory store for offline/local fallback
+_MEM_USERS: Dict[str, Dict[str, Any]] = {}
+_MEM_SESSIONS: Dict[str, Dict[str, Any]] = {}
+_MEM_USER_LABS: Dict[str, List[Dict[str, Any]]] = {}
 _MEM_RUNS: Dict[str, Dict[str, Any]] = {}
 _MEM_CANDIDATES: Dict[str, Dict[str, Any]] = {}
 _MEM_REPORTS: Dict[str, Dict[str, Any]] = {}
@@ -29,13 +35,320 @@ def generate_patient_key(patient_name: str, patient_id: Optional[str] = None) ->
     return clean_name
 
 class Repository:
+    # --- User Authentication & Session Persistence ---
+
+    @staticmethod
+    async def create_user(name: str, email: str, password_hash: str) -> Dict[str, Any]:
+        """Creates a new user account."""
+        user_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        clean_email = email.lower().strip()
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            INSERT INTO phr.users (id, name, email, password_hash, created_at, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            RETURNING id, name, email, created_at
+                            """,
+                            (user_id, name.strip(), clean_email, password_hash, now, now)
+                        )
+                        row = await cur.fetchone()
+                        await conn.commit()
+                        res = dict(row)
+                        res["id"] = str(res["id"])
+                        return res
+            except Exception as e:
+                # Fall back to in-memory if DB fails
+                pass
+
+        data = {
+            "id": user_id,
+            "name": name.strip(),
+            "email": clean_email,
+            "password_hash": password_hash,
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat()
+        }
+        _MEM_USERS[user_id] = data
+        return {"id": user_id, "name": name.strip(), "email": clean_email, "created_at": data["created_at"]}
+
+    @staticmethod
+    async def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
+        """Finds user by email address."""
+        clean_email = email.lower().strip()
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute("SELECT * FROM phr.users WHERE LOWER(email) = %s", (clean_email,))
+                        row = await cur.fetchone()
+                        if row:
+                            res = dict(row)
+                            res["id"] = str(res["id"])
+                            return res
+            except Exception:
+                pass
+        for u in _MEM_USERS.values():
+            if u["email"].lower() == clean_email:
+                return u
+        return None
+
+    @staticmethod
+    async def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves user profile by ID."""
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute("SELECT id, name, email, created_at FROM phr.users WHERE id = %s", (user_id,))
+                        row = await cur.fetchone()
+                        if row:
+                            res = dict(row)
+                            res["id"] = str(res["id"])
+                            return res
+            except Exception:
+                pass
+        u = _MEM_USERS.get(user_id)
+        if u:
+            return {"id": u["id"], "name": u["name"], "email": u["email"], "created_at": u["created_at"]}
+        return None
+
+    @staticmethod
+    async def create_session(user_id: str, token_hash: str, expires_at: datetime) -> Dict[str, Any]:
+        """Creates an authenticated session token for the user."""
+        now = datetime.now(timezone.utc)
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            INSERT INTO phr.auth_sessions (token_hash, user_id, expires_at, created_at)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (token_hash) DO UPDATE SET expires_at = EXCLUDED.expires_at
+                            RETURNING *
+                            """,
+                            (token_hash, user_id, expires_at, now)
+                        )
+                        row = await cur.fetchone()
+                        await conn.commit()
+                        return dict(row)
+            except Exception:
+                pass
+        _MEM_SESSIONS[token_hash] = {
+            "token_hash": token_hash,
+            "user_id": user_id,
+            "expires_at": expires_at,
+            "created_at": now
+        }
+        return _MEM_SESSIONS[token_hash]
+
+    @staticmethod
+    async def get_user_by_session_token(token: str) -> Optional[Dict[str, Any]]:
+        """Resolves user profile from a bearer session token."""
+        token_h = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        now = datetime.now(timezone.utc)
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            SELECT u.id, u.name, u.email, u.created_at
+                            FROM phr.auth_sessions s
+                            JOIN phr.users u ON s.user_id = u.id
+                            WHERE s.token_hash = %s AND s.expires_at > %s
+                            """,
+                            (token_h, now)
+                        )
+                        row = await cur.fetchone()
+                        if row:
+                            res = dict(row)
+                            res["id"] = str(res["id"])
+                            return res
+            except Exception:
+                pass
+        sess = _MEM_SESSIONS.get(token_h)
+        if sess and sess["expires_at"] > now:
+            return await Repository.get_user_by_id(sess["user_id"])
+        return None
+
+    @staticmethod
+    async def delete_session(token: str) -> bool:
+        """Invalidates a session token (logout)."""
+        token_h = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute("DELETE FROM phr.auth_sessions WHERE token_hash = %s", (token_h,))
+                        await conn.commit()
+                        return True
+            except Exception:
+                pass
+        if token_h in _MEM_SESSIONS:
+            del _MEM_SESSIONS[token_h]
+            return True
+        return False
+
+    @staticmethod
+    async def get_default_test_user() -> Dict[str, Any]:
+        """Provides a default user for offline test suites."""
+        user = await Repository.get_user_by_email("test@example.com")
+        if user:
+            return user
+        try:
+            return await Repository.create_user("Test User", "test@example.com", "$2b$12$dummyhashfortestingonly")
+        except Exception:
+            return {"id": "00000000-0000-0000-0000-000000000001", "name": "Test User", "email": "test@example.com"}
+
+    # --- Custom User Labs Persistence ---
+
+    @staticmethod
+    async def get_user_labs(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns custom lab portals configured by the user."""
+        if not user_id:
+            return []
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "SELECT id, key, name, url, username, password, layout, has_captcha, created_at FROM phr.user_labs WHERE user_id = %s ORDER BY created_at ASC",
+                            (user_id,)
+                        )
+                        rows = await cur.fetchall()
+                        res = []
+                        for r in rows:
+                            item = dict(r)
+                            item["id"] = str(item["id"])
+                            item["is_custom"] = True
+                            res.append(item)
+                        return res
+            except Exception:
+                pass
+        return [dict(l) for l in _MEM_USER_LABS.get(user_id, [])]
+
+    @staticmethod
+    async def create_user_lab(
+        user_id: str,
+        name: str,
+        url: str,
+        username: str = "",
+        password: str = "",
+        layout: str = "table",
+        has_captcha: bool = False
+    ) -> Dict[str, Any]:
+        """Adds a custom lab portal for the user."""
+        lab_id = str(uuid.uuid4())
+        clean_name = re.sub(r"[^a-zA-Z0-9]+", "_", name.strip().lower()).strip("_")
+        key = f"custom_{clean_name}_{lab_id[:6]}"
+        now = datetime.now(timezone.utc)
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            INSERT INTO phr.user_labs (id, user_id, key, name, url, username, password, layout, has_captcha, created_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING id, key, name, url, username, password, layout, has_captcha, created_at
+                            """,
+                            (lab_id, user_id, key, name.strip(), url.strip(), username, password, layout, has_captcha, now)
+                        )
+                        row = await cur.fetchone()
+                        await conn.commit()
+                        res = dict(row)
+                        res["id"] = str(res["id"])
+                        res["is_custom"] = True
+                        return res
+            except Exception as e:
+                pass
+
+        data = {
+            "id": lab_id,
+            "user_id": user_id,
+            "key": key,
+            "name": name.strip(),
+            "url": url.strip(),
+            "username": username,
+            "password": password,
+            "layout": layout,
+            "has_captcha": has_captcha,
+            "created_at": now.isoformat(),
+            "is_custom": True
+        }
+        _MEM_USER_LABS.setdefault(user_id, []).append(data)
+        return data
+
+    @staticmethod
+    async def delete_user_lab(user_id: str, key: str) -> bool:
+        """Deletes a custom lab portal created by the user."""
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "DELETE FROM phr.user_labs WHERE user_id = %s AND key = %s",
+                            (user_id, key)
+                        )
+                        await conn.commit()
+                        return True
+            except Exception:
+                pass
+        if user_id in _MEM_USER_LABS:
+            _MEM_USER_LABS[user_id] = [l for l in _MEM_USER_LABS[user_id] if l["key"] != key]
+            return True
+        return False
+
+    @staticmethod
+    async def get_lab_config(key: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Finds custom lab configuration by key."""
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        if user_id:
+                            await cur.execute("SELECT * FROM phr.user_labs WHERE key = %s AND user_id = %s", (key, user_id))
+                        else:
+                            await cur.execute("SELECT * FROM phr.user_labs WHERE key = %s", (key,))
+                        row = await cur.fetchone()
+                        if row:
+                            res = dict(row)
+                            res["id"] = str(res["id"])
+                            res["is_custom"] = True
+                            return res
+            except Exception:
+                pass
+        for labs_list in _MEM_USER_LABS.values():
+            for l in labs_list:
+                if l["key"] == key:
+                    return l
+        return None
+
+    # --- Run Orchestration (Scoped to User) ---
+
     @staticmethod
     async def create_run(
         patient_name: str,
         patient_id: Optional[str],
         date_from: date,
         date_to: date,
-        labs: List[str]
+        labs: List[str],
+        user_id: Optional[str] = None
     ) -> Dict[str, Any]:
         run_id = str(uuid.uuid4())
         patient_key = generate_patient_key(patient_name, patient_id)
@@ -48,21 +361,23 @@ class Repository:
                     async with conn.cursor() as cur:
                         await cur.execute(
                             """
-                            INSERT INTO runs (id, patient_name, patient_id, patient_key, date_from, date_to, labs, status, created_at, updated_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            INSERT INTO phr.runs (id, user_id, patient_name, patient_id, patient_key, date_from, date_to, labs, status, created_at, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             RETURNING *
                             """,
-                            (run_id, patient_name, patient_id, patient_key, date_from, date_to, labs, "pending", now, now)
+                            (run_id, user_id, patient_name, patient_id, patient_key, date_from, date_to, labs, "pending", now, now)
                         )
                         row = await cur.fetchone()
                         await conn.commit()
-                        return dict(row)
+                        res = dict(row)
+                        res["id"] = str(res["id"])
+                        return res
             except Exception as e:
-                # Fall back to in-memory if DB fails
                 pass
 
         data = {
             "id": run_id,
+            "user_id": user_id,
             "patient_name": patient_name,
             "patient_id": patient_id,
             "patient_key": patient_key,
@@ -78,33 +393,49 @@ class Repository:
         return data
 
     @staticmethod
-    async def get_run(run_id: str) -> Optional[Dict[str, Any]]:
+    async def get_run(run_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         pool = get_db_pool()
         if pool and not pool.closed:
             try:
                 async with pool.connection() as conn:
                     async with conn.cursor() as cur:
-                        await cur.execute("SELECT * FROM runs WHERE id = %s", (run_id,))
+                        if user_id:
+                            await cur.execute("SELECT * FROM phr.runs WHERE id = %s AND (user_id = %s OR user_id IS NULL)", (run_id, user_id))
+                        else:
+                            await cur.execute("SELECT * FROM phr.runs WHERE id = %s", (run_id,))
                         row = await cur.fetchone()
                         if row:
-                            return dict(row)
+                            res = dict(row)
+                            res["id"] = str(res["id"])
+                            return res
             except Exception:
                 pass
-        return _MEM_RUNS.get(run_id)
+        r = _MEM_RUNS.get(run_id)
+        if r and (not user_id or not r.get("user_id") or r.get("user_id") == user_id):
+            return r
+        return None
 
     @staticmethod
-    async def list_runs() -> List[Dict[str, Any]]:
+    async def list_runs(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         pool = get_db_pool()
         if pool and not pool.closed:
             try:
                 async with pool.connection() as conn:
                     async with conn.cursor() as cur:
-                        await cur.execute("SELECT * FROM runs ORDER BY created_at DESC")
+                        if user_id:
+                            await cur.execute("SELECT * FROM phr.runs WHERE (user_id = %s OR user_id IS NULL) ORDER BY created_at DESC", (user_id,))
+                        else:
+                            await cur.execute("SELECT * FROM phr.runs ORDER BY created_at DESC")
                         rows = await cur.fetchall()
-                        return [dict(r) for r in rows]
+                        res = []
+                        for r in rows:
+                            item = dict(r)
+                            item["id"] = str(item["id"])
+                            res.append(item)
+                        return res
             except Exception:
                 pass
-        runs = list(_MEM_RUNS.values())
+        runs = [r for r in _MEM_RUNS.values() if not user_id or not r.get("user_id") or r.get("user_id") == user_id]
         runs.sort(key=lambda x: str(x.get("created_at")), reverse=True)
         return runs
 
@@ -117,7 +448,7 @@ class Repository:
                 async with pool.connection() as conn:
                     async with conn.cursor() as cur:
                         await cur.execute(
-                            "UPDATE runs SET status = %s, error = %s, updated_at = %s WHERE id = %s",
+                            "UPDATE phr.runs SET status = %s, error = %s, updated_at = %s WHERE id = %s",
                             (status, error, now, run_id)
                         )
                         await conn.commit()
@@ -130,6 +461,101 @@ class Repository:
             _MEM_RUNS[run_id]["updated_at"] = now.isoformat()
 
     @staticmethod
+    async def delete_run(run_id: str, user_id: Optional[str] = None) -> bool:
+        """Deletes a run and cascades to candidates, events, approvals, and associated reports."""
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        if user_id:
+                            await cur.execute(
+                                "SELECT id FROM phr.runs WHERE id = %s AND (user_id = %s OR user_id IS NULL)",
+                                (run_id, user_id)
+                            )
+                        else:
+                            await cur.execute("SELECT id FROM phr.runs WHERE id = %s", (run_id,))
+                        row = await cur.fetchone()
+                        if not row:
+                            return False
+
+                        # Delete reports generated from candidates belonging to this run
+                        await cur.execute(
+                            "DELETE FROM phr.reports WHERE candidate_id IN (SELECT id FROM phr.candidates WHERE run_id = %s)",
+                            (run_id,)
+                        )
+                        # Delete the run itself (phr.candidates, phr.events, phr.approvals cascade)
+                        await cur.execute("DELETE FROM phr.runs WHERE id = %s", (run_id,))
+                        await conn.commit()
+                        return True
+            except Exception as e:
+                logger.error(f"Error deleting run {run_id} from database: {e}")
+                pass
+
+        # In-memory fallback
+        if run_id in _MEM_RUNS:
+            r = _MEM_RUNS[run_id]
+            if user_id and r.get("user_id") and r.get("user_id") != user_id:
+                return False
+            cand_ids = [cid for cid, c in _MEM_CANDIDATES.items() if c.get("run_id") == run_id]
+            for cid in cand_ids:
+                _MEM_CANDIDATES.pop(cid, None)
+                rep_ids = [rid for rid, rep in _MEM_REPORTS.items() if rep.get("candidate_id") == cid]
+                for rid in rep_ids:
+                    _MEM_REPORTS.pop(rid, None)
+            global _MEM_EVENTS
+            _MEM_EVENTS = [e for e in _MEM_EVENTS if e.get("run_id") != run_id]
+            _MEM_APPROVALS.pop(run_id, None)
+            del _MEM_RUNS[run_id]
+            return True
+        return False
+
+    @staticmethod
+    async def delete_runs(run_ids: List[str], user_id: Optional[str] = None) -> int:
+        """Deletes multiple runs by ID."""
+        count = 0
+        for rid in run_ids:
+            if await Repository.delete_run(rid, user_id=user_id):
+                count += 1
+        return count
+
+    @staticmethod
+    async def clear_all_runs(user_id: Optional[str] = None) -> int:
+        """Deletes all runs for the specified user or all runs if unauthenticated."""
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        if user_id:
+                            await cur.execute("SELECT id FROM phr.runs WHERE (user_id = %s OR user_id IS NULL)", (user_id,))
+                        else:
+                            await cur.execute("SELECT id FROM phr.runs")
+                        rows = await cur.fetchall()
+                        run_ids = [str(r["id"]) for r in rows]
+                        for rid in run_ids:
+                            await cur.execute(
+                                "DELETE FROM phr.reports WHERE candidate_id IN (SELECT id FROM phr.candidates WHERE run_id = %s)",
+                                (rid,)
+                            )
+                            await cur.execute("DELETE FROM phr.runs WHERE id = %s", (rid,))
+                        await conn.commit()
+                        return len(run_ids)
+            except Exception as e:
+                logger.error(f"Error clearing runs from database: {e}")
+                pass
+
+        runs_to_delete = [
+            rid for rid, r in _MEM_RUNS.items()
+            if not user_id or not r.get("user_id") or r.get("user_id") == user_id
+        ]
+        count = 0
+        for rid in runs_to_delete:
+            if await Repository.delete_run(rid, user_id=user_id):
+                count += 1
+        return count
+
+    @staticmethod
     async def record_event(run_id: str, agent: str, level: str, message: str, data: Optional[Dict[str, Any]] = None):
         now = datetime.now(timezone.utc)
         pool = get_db_pool()
@@ -139,15 +565,15 @@ class Repository:
                     async with conn.cursor() as cur:
                         await cur.execute(
                             """
-                            INSERT INTO events (run_id, agent, level, message, data, created_at)
+                            INSERT INTO phr.events (run_id, agent, level, message, data, created_at)
                             VALUES (%s, %s, %s, %s, %s, %s)
                             """,
                             (run_id, agent, level, message, json.dumps(data) if data else None, now)
                         )
                         await conn.commit()
                         return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to record event to Postgres ({e}), saving to in-memory event buffer.")
         _MEM_EVENTS.append({
             "id": len(_MEM_EVENTS) + 1,
             "run_id": run_id,
@@ -166,7 +592,7 @@ class Repository:
                 async with pool.connection() as conn:
                     async with conn.cursor() as cur:
                         await cur.execute(
-                            "SELECT * FROM events WHERE run_id = %s AND id > %s ORDER BY id ASC",
+                            "SELECT * FROM phr.events WHERE run_id = %s AND id > %s ORDER BY id ASC",
                             (run_id, after_id)
                         )
                         rows = await cur.fetchall()
@@ -203,7 +629,7 @@ class Repository:
                     async with conn.cursor() as cur:
                         await cur.execute(
                             """
-                            INSERT INTO candidates (
+                            INSERT INTO phr.candidates (
                                 id, run_id, lab, filename, source_url, listing_title,
                                 portal_report_id, portal_date, fetched_at, http_status,
                                 content_type, file_bytes, size_bytes, sha256, status
@@ -224,9 +650,13 @@ class Repository:
                         )
                         row = await cur.fetchone()
                         await conn.commit()
-                        return dict(row)
-            except Exception:
-                pass
+                        res = dict(row)
+                        res["id"] = str(res["id"])
+                        if res.get("run_id"):
+                            res["run_id"] = str(res["run_id"])
+                        return res
+            except Exception as e:
+                logger.warning(f"Failed to save candidate to Postgres ({e}), using in-memory store.")
 
         # In-memory storage
         cand_data = {
@@ -277,10 +707,14 @@ class Repository:
             try:
                 async with pool.connection() as conn:
                     async with conn.cursor() as cur:
-                        await cur.execute("SELECT * FROM candidates WHERE id = %s", (candidate_id,))
+                        await cur.execute("SELECT * FROM phr.candidates WHERE id = %s", (candidate_id,))
                         row = await cur.fetchone()
                         if row:
-                            return dict(row)
+                            d = dict(row)
+                            d["id"] = str(d["id"])
+                            if d.get("run_id"):
+                                d["run_id"] = str(d["run_id"])
+                            return d
             except Exception:
                 pass
         return _MEM_CANDIDATES.get(candidate_id)
@@ -292,9 +726,16 @@ class Repository:
             try:
                 async with pool.connection() as conn:
                     async with conn.cursor() as cur:
-                        await cur.execute("SELECT * FROM candidates WHERE run_id = %s ORDER BY lab, filename", (run_id,))
+                        await cur.execute("SELECT * FROM phr.candidates WHERE run_id = %s ORDER BY lab, filename", (run_id,))
                         rows = await cur.fetchall()
-                        return [dict(r) for r in rows]
+                        result = []
+                        for r in rows:
+                            d = dict(r)
+                            d["id"] = str(d["id"])
+                            if d.get("run_id"):
+                                d["run_id"] = str(d["run_id"])
+                            result.append(d)
+                        return result
             except Exception:
                 pass
         return [c for c in _MEM_CANDIDATES.values() if c["run_id"] == run_id]
@@ -318,7 +759,7 @@ class Repository:
                     async with conn.cursor() as cur:
                         await cur.execute(
                             """
-                            UPDATE candidates SET
+                            UPDATE phr.candidates SET
                                 extract_ok = %s,
                                 extract_note = %s,
                                 extract_source = %s,
@@ -355,6 +796,8 @@ class Repository:
         decision: str,
         decision_reason: str
     ):
+        legit_json = json.dumps(legit_result, default=str) if legit_result is not None else None
+        dup_json = json.dumps(duplicate_result, default=str) if duplicate_result is not None else None
         pool = get_db_pool()
         if pool and not pool.closed:
             try:
@@ -362,19 +805,20 @@ class Repository:
                     async with conn.cursor() as cur:
                         await cur.execute(
                             """
-                            UPDATE candidates SET
+                            UPDATE phr.candidates SET
                                 legit_result = %s,
                                 duplicate_result = %s,
                                 decision = %s,
                                 decision_reason = %s
                             WHERE id = %s
                             """,
-                            (json.dumps(legit_result), json.dumps(duplicate_result), decision, decision_reason, candidate_id)
+                            (legit_json, dup_json, decision, decision_reason, candidate_id)
                         )
                         await conn.commit()
                         return
-            except Exception:
-                pass
+            except Exception as e:
+                import logging
+                logging.getLogger("phr-organizer.repo").error(f"Failed to update candidate check ({e})")
         if candidate_id in _MEM_CANDIDATES:
             _MEM_CANDIDATES[candidate_id].update({
                 "legit_result": legit_result,
@@ -384,22 +828,54 @@ class Repository:
             })
 
     @staticmethod
-    async def get_stored_reports(patient_key: str) -> List[Dict[str, Any]]:
-        """Returns all permanent reports stored for the given patient key."""
+    async def get_stored_reports(patient_key: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns all permanent reports stored for the given patient key and user."""
+        clean_prefix = patient_key.split('_')[0] if patient_key else ""
         pool = get_db_pool()
         if pool and not pool.closed:
             try:
                 async with pool.connection() as conn:
                     async with conn.cursor() as cur:
-                        await cur.execute(
-                            "SELECT * FROM reports WHERE patient_key = %s ORDER BY report_date DESC",
-                            (patient_key,)
-                        )
+                        if user_id:
+                            await cur.execute(
+                                """
+                                SELECT * FROM phr.reports 
+                                WHERE (user_id = %s OR user_id IS NULL)
+                                  AND (
+                                    patient_key = %s 
+                                    OR patient_key LIKE %s
+                                    OR %s LIKE patient_key || '%%'
+                                  )
+                                ORDER BY report_date DESC
+                                """,
+                                (user_id, patient_key, f"{clean_prefix}%", patient_key)
+                            )
+                        else:
+                            await cur.execute(
+                                """
+                                SELECT * FROM phr.reports 
+                                WHERE (
+                                    patient_key = %s 
+                                    OR patient_key LIKE %s
+                                    OR %s LIKE patient_key || '%%'
+                                )
+                                ORDER BY report_date DESC
+                                """,
+                                (patient_key, f"{clean_prefix}%", patient_key)
+                            )
                         rows = await cur.fetchall()
                         return [dict(r) for r in rows]
-            except Exception:
+            except Exception as e:
+                logger.error(f"Error fetching stored reports: {e}")
                 pass
-        return [r for r in _MEM_REPORTS.values() if r["patient_key"] == patient_key]
+        return [
+            r for r in _MEM_REPORTS.values()
+            if (
+                r["patient_key"] == patient_key
+                or r["patient_key"].startswith(clean_prefix)
+                or patient_key.startswith(r["patient_key"])
+            ) and (not user_id or not r.get("user_id") or r.get("user_id") == user_id)
+        ]
 
     @staticmethod
     async def record_approval(run_id: str, approved: bool, overrides: Dict[str, str]):
@@ -412,7 +888,7 @@ class Repository:
                     async with conn.cursor() as cur:
                         await cur.execute(
                             """
-                            INSERT INTO approvals (id, run_id, approved, overrides, created_at)
+                            INSERT INTO phr.approvals (id, run_id, approved, overrides, created_at)
                             VALUES (%s, %s, %s, %s, %s)
                             """,
                             (app_id, run_id, approved, json.dumps(overrides), now)
@@ -437,9 +913,10 @@ class Repository:
         report_id: str,
         test_name: str,
         report_date: date,
-        sha256: str
+        sha256: str,
+        user_id: Optional[str] = None
     ) -> bool:
-        """Stores candidate into reports table. Idempotent via UNIQUE (patient_key, report_id) and UNIQUE (patient_key, sha256)."""
+        """Stores candidate into reports table with user isolation and strict deduplication."""
         rep_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
         pool = get_db_pool()
@@ -447,36 +924,68 @@ class Repository:
             try:
                 async with pool.connection() as conn:
                     async with conn.cursor() as cur:
+                        # Pre-check: Avoid duplicate report insertion for same user/patient
+                        if user_id:
+                            await cur.execute(
+                                """
+                                SELECT id FROM phr.reports 
+                                WHERE (user_id = %s OR user_id IS NULL)
+                                  AND (sha256 = %s OR (lab = %s AND report_id = %s))
+                                LIMIT 1
+                                """,
+                                (user_id, sha256, lab, report_id)
+                            )
+                        else:
+                            await cur.execute(
+                                """
+                                SELECT id FROM phr.reports 
+                                WHERE (sha256 = %s OR (lab = %s AND report_id = %s))
+                                LIMIT 1
+                                """,
+                                (sha256, lab, report_id)
+                            )
+                        existing_row = await cur.fetchone()
+                        if existing_row:
+                            logger.info(f"Duplicate report detected for {lab}/{report_id} ({sha256[:8]}). Linking candidate without duplicating report row.")
+                            await cur.execute(
+                                "UPDATE phr.candidates SET status = 'stored' WHERE id = %s",
+                                (candidate_id,)
+                            )
+                            await conn.commit()
+                            return True
+
                         await cur.execute(
                             """
-                            INSERT INTO reports (id, candidate_id, patient_key, lab, report_id, test_name, report_date, sha256, created_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            INSERT INTO phr.reports (id, user_id, candidate_id, patient_key, lab, report_id, test_name, report_date, sha256, created_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             ON CONFLICT DO NOTHING
                             RETURNING id
                             """,
-                            (rep_id, candidate_id, patient_key, lab, report_id, test_name, report_date, sha256, now)
+                            (rep_id, user_id, candidate_id, patient_key, lab, report_id, test_name, report_date, sha256, now)
                         )
                         row = await cur.fetchone()
                         await cur.execute(
-                            "UPDATE candidates SET status = 'stored' WHERE id = %s",
+                            "UPDATE phr.candidates SET status = 'stored' WHERE id = %s",
                             (candidate_id,)
                         )
                         await conn.commit()
-                        return bool(row)
-            except Exception:
+                        return True
+            except Exception as e:
+                logger.error(f"Error storing candidate {candidate_id}: {e}")
                 pass
 
         # In-memory store
         for existing in _MEM_REPORTS.values():
-            if existing["patient_key"] == patient_key and (
+            if (not user_id or not existing.get("user_id") or existing.get("user_id") == user_id) and (
                 existing["report_id"] == report_id or existing["sha256"] == sha256
             ):
                 if candidate_id in _MEM_CANDIDATES:
-                    _MEM_CANDIDATES[candidate_id]["status"] = "not_stored"
-                return False
+                    _MEM_CANDIDATES[candidate_id]["status"] = "stored"
+                return True
 
         _MEM_REPORTS[rep_id] = {
             "id": rep_id,
+            "user_id": user_id,
             "candidate_id": candidate_id,
             "patient_key": patient_key,
             "lab": lab,
@@ -498,7 +1007,7 @@ class Repository:
                 async with pool.connection() as conn:
                     async with conn.cursor() as cur:
                         await cur.execute(
-                            "UPDATE candidates SET status = 'not_stored' WHERE id = %s",
+                            "UPDATE phr.candidates SET status = 'not_stored' WHERE id = %s",
                             (candidate_id,)
                         )
                         await conn.commit()
@@ -516,7 +1025,7 @@ class Repository:
                 async with pool.connection() as conn:
                     async with conn.cursor() as cur:
                         await cur.execute(
-                            "UPDATE candidates SET recheck_ok = %s, recheck_note = %s WHERE id = %s",
+                            "UPDATE phr.candidates SET recheck_ok = %s, recheck_note = %s WHERE id = %s",
                             (recheck_ok, recheck_note, candidate_id)
                         )
                         await conn.commit()
@@ -528,8 +1037,8 @@ class Repository:
             _MEM_CANDIDATES[candidate_id]["recheck_note"] = recheck_note
 
     @staticmethod
-    async def get_timeline(patient_key: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Returns sorted health timeline joined with candidate verification metadata."""
+    async def get_timeline(patient_key: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns sorted health timeline joined with candidate verification metadata scoped to user."""
         pool = get_db_pool()
         if pool and not pool.closed:
             try:
@@ -538,6 +1047,7 @@ class Repository:
                         query = """
                             SELECT
                                 r.id AS report_uuid,
+                                r.user_id,
                                 r.candidate_id,
                                 r.patient_key,
                                 r.lab,
@@ -551,17 +1061,33 @@ class Repository:
                                 c.x_patient_id,
                                 c.recheck_ok,
                                 c.recheck_note
-                            FROM reports r
-                            LEFT JOIN candidates c ON r.candidate_id = c.id
+                            FROM phr.reports r
+                            LEFT JOIN phr.candidates c ON r.candidate_id = c.id
                         """
+                        where_clauses = []
                         params = []
                         if patient_key:
-                            query += " WHERE r.patient_key = %s"
+                            where_clauses.append("r.patient_key = %s")
                             params.append(patient_key)
+                        if user_id:
+                            where_clauses.append("(r.user_id = %s OR r.user_id IS NULL)")
+                            params.append(user_id)
+                        if where_clauses:
+                            query += " WHERE " + " AND ".join(where_clauses)
                         query += " ORDER BY r.report_date DESC, r.created_at DESC"
                         await cur.execute(query, tuple(params))
                         rows = await cur.fetchall()
-                        return [dict(row) for row in rows]
+                        seen_hashes = set()
+                        deduped = []
+                        for row in rows:
+                            row_dict = dict(row)
+                            h = row_dict.get("sha256")
+                            if h and h in seen_hashes:
+                                continue
+                            if h:
+                                seen_hashes.add(h)
+                            deduped.append(row_dict)
+                        return deduped
             except Exception:
                 pass
 
@@ -569,9 +1095,12 @@ class Repository:
         for rep in _MEM_REPORTS.values():
             if patient_key and rep["patient_key"] != patient_key:
                 continue
+            if user_id and rep.get("user_id") and rep["user_id"] != user_id:
+                continue
             cand = _MEM_CANDIDATES.get(rep.get("candidate_id", ""), {})
             timeline.append({
                 "report_uuid": rep["id"],
+                "user_id": rep.get("user_id"),
                 "candidate_id": rep.get("candidate_id"),
                 "patient_key": rep["patient_key"],
                 "lab": rep["lab"],

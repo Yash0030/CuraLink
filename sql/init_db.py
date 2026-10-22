@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Database initialization script for Personal Health Record Organizer.
 
-Applies sql/schema.sql to PostgreSQL / Neon database.
-Detects outdated table schemas and supports --reset flag.
+Applies sql/schema.sql to PostgreSQL / Neon database into an isolated 'phr' schema.
+Protects the 'public' schema and any existing unrelated tables.
 """
 
 import os
@@ -18,7 +18,14 @@ load_dotenv(ROOT_DIR / ".env")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-APP_TABLES = ["approvals", "events", "reports", "candidates", "runs"]
+# Legacy project tables that should never live in public
+LEGACY_PUBLIC_TABLES = [
+    "approvals", "events", "reports", "candidates", "runs",
+    "user_labs", "auth_sessions",
+    "checkpoint_writes", "checkpoint_blobs", "checkpoints", "checkpoint_migrations"
+]
+
+PHR_TABLES = ["approvals", "events", "reports", "candidates", "runs", "user_labs", "auth_sessions", "users"]
 
 def init_database(db_url: str = None, reset: bool = False) -> bool:
     url = db_url or DATABASE_URL
@@ -35,29 +42,40 @@ def init_database(db_url: str = None, reset: bool = False) -> bool:
     try:
         with psycopg.connect(url, prepare_threshold=None) as conn:
             with conn.cursor() as cur:
-                # Check if existing tables are from an outdated schema missing patient_key
-                cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='runs' AND column_name='patient_key'")
-                has_patient_key = cur.fetchone() is not None
+                # 1. Clean up any legacy project tables that might have been created in 'public'
+                for tbl in LEGACY_PUBLIC_TABLES:
+                    cur.execute(f"DROP TABLE IF EXISTS public.{tbl} CASCADE;")
+                conn.commit()
 
-                cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name='runs'")
-                runs_exists = cur.fetchone() is not None
-
-                should_drop = reset or (runs_exists and not has_patient_key)
-
-                if should_drop:
-                    print("Detected outdated or requested reset of application tables. Recreating fresh schema...")
-                    for tbl in APP_TABLES:
-                        cur.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE;")
+                # 2. If reset requested, drop the 'phr' schema completely
+                if reset:
+                    print("Reset requested. Dropping schema 'phr' CASCADE...")
+                    cur.execute("DROP SCHEMA IF EXISTS phr CASCADE;")
                     conn.commit()
 
-                # Read and execute schema
+                # 3. Create schema phr and set search_path
+                cur.execute("CREATE SCHEMA IF NOT EXISTS phr;")
+                cur.execute("SET search_path TO phr, public;")
+                conn.commit()
+
+                # 4. Read and execute schema.sql
+                print("Applying schema.sql into 'phr' schema...")
                 with open(schema_file, "r", encoding="utf-8") as f:
                     schema_sql = f.read()
                 cur.execute(schema_sql)
+                conn.commit()
 
-            conn.commit()
+                # 5. Verify created tables in 'phr' schema
+                cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='phr' ORDER BY table_name")
+                phr_tables = [r[0] for r in cur.fetchall()]
+                print(f"[SUCCESS] Tables in 'phr' schema ({len(phr_tables)}): {', '.join(phr_tables)}")
 
-        print("[SUCCESS] Schema initialized successfully. All tables and indexes are ready.")
+                # 6. Verify public schema isolation
+                cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name")
+                public_tables = [r[0] for r in cur.fetchall()]
+                print(f"[INFO] Unrelated tables preserved in 'public' schema ({len(public_tables)}): {', '.join(public_tables)}")
+
+        print("\n[SUCCESS] Dedicated 'phr' schema initialized successfully. Public schema is completely isolated.")
         return True
     except Exception as e:
         print(f"[ERROR] Database initialization failed: {e}")
