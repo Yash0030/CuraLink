@@ -3,13 +3,23 @@ import { Trash2, CheckSquare, Square } from 'lucide-react';
 import type { RunSummary } from '../types';
 import { fetchAllRuns, deleteRun, deleteRuns } from '../api';
 import { RunView } from './RunView';
+import { useConfirm } from './ConfirmModal';
+
+const getSelectedRunFromHash = (): string | null => {
+  const hash = window.location.hash;
+  if (hash.startsWith('#past-runs/') || hash.startsWith('#history/')) {
+    return hash.split('/')[1] || null;
+  }
+  return null;
+};
 
 export const PastRunsView: React.FC = () => {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(getSelectedRunFromHash);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
+  const { confirm, showAlert } = useConfirm();
 
   const loadRuns = async () => {
     try {
@@ -26,6 +36,28 @@ export const PastRunsView: React.FC = () => {
   useEffect(() => {
     loadRuns();
   }, []);
+
+  useEffect(() => {
+    const syncFromHash = () => {
+      setSelectedRunId(getSelectedRunFromHash());
+    };
+    window.addEventListener('popstate', syncFromHash);
+    return () => window.removeEventListener('popstate', syncFromHash);
+  }, []);
+
+  const handleSelectRun = (runId: string) => {
+    setSelectedRunId(runId);
+    window.history.pushState({ tab: 'history', runId }, '', `#past-runs/${runId}`);
+  };
+
+  const handleBackToList = () => {
+    setSelectedRunId(null);
+    if (window.location.hash.includes('/')) {
+      window.history.back();
+    } else {
+      window.history.replaceState({ tab: 'history' }, '', '#past-runs');
+    }
+  };
 
   const formatRunDate = (dateStr: string) => {
     try {
@@ -115,9 +147,13 @@ export const PastRunsView: React.FC = () => {
   };
 
   const handleDeleteSingle = async (runId: string, patientName: string) => {
-    const confirmed = window.confirm(
-      `Are you sure you want to delete the collection run for "${patientName}"?\n\nThis will permanently delete the run, its staged candidates, and events.`
-    );
+    const confirmed = await confirm({
+      title: 'Delete Collection Run',
+      message: `Are you sure you want to delete the collection run for "${patientName}"?\n\nThis will permanently delete the run, its staged candidates, and events.`,
+      confirmText: 'Delete Run',
+      cancelText: 'Cancel',
+      isDanger: true,
+    });
     if (!confirmed) return;
 
     try {
@@ -134,7 +170,7 @@ export const PastRunsView: React.FC = () => {
       }
     } catch (err: any) {
       console.error('Delete run error:', err);
-      alert('Failed to delete run: ' + (err.message || String(err)));
+      await showAlert('Failed to Delete Run', err.message || String(err));
     } finally {
       setDeleting(false);
     }
@@ -143,9 +179,13 @@ export const PastRunsView: React.FC = () => {
   const handleDeleteSelected = async () => {
     if (selectedIds.size === 0) return;
     const count = selectedIds.size;
-    const confirmed = window.confirm(
-      `Are you sure you want to delete ${count} selected collection run${count > 1 ? 's' : ''}?\n\nThis action cannot be undone.`
-    );
+    const confirmed = await confirm({
+      title: `Delete ${count} Selected Run${count > 1 ? 's' : ''}`,
+      message: `Are you sure you want to delete ${count} selected collection run${count > 1 ? 's' : ''}?\n\nThis action cannot be undone.`,
+      confirmText: `Delete ${count} Run${count > 1 ? 's' : ''}`,
+      cancelText: 'Cancel',
+      isDanger: true,
+    });
     if (!confirmed) return;
 
     try {
@@ -158,7 +198,7 @@ export const PastRunsView: React.FC = () => {
       setSelectedIds(new Set());
     } catch (err: any) {
       console.error('Delete selected runs error:', err);
-      alert('Failed to delete selected runs: ' + (err.message || String(err)));
+      await showAlert('Failed to Delete Runs', err.message || String(err));
     } finally {
       setDeleting(false);
     }
@@ -166,9 +206,13 @@ export const PastRunsView: React.FC = () => {
 
   const handleClearAll = async () => {
     if (runs.length === 0) return;
-    const confirmed = window.confirm(
-      `Are you sure you want to delete ALL past collection runs (${runs.length})?\n\nAll historical collection data, staged candidates, and events will be permanently removed.`
-    );
+    const confirmed = await confirm({
+      title: 'Delete All Past Runs',
+      message: `Are you sure you want to delete ALL past collection runs (${runs.length})?\n\nAll historical collection data, staged candidates, and events will be permanently removed.`,
+      confirmText: 'Delete All Runs',
+      cancelText: 'Cancel',
+      isDanger: true,
+    });
     if (!confirmed) return;
 
     try {
@@ -179,7 +223,7 @@ export const PastRunsView: React.FC = () => {
       setSelectedRunId(null);
     } catch (err: any) {
       console.error('Clear all runs error:', err);
-      alert('Failed to clear runs: ' + (err.message || String(err)));
+      await showAlert('Failed to Clear Runs', err.message || String(err));
     } finally {
       setDeleting(false);
     }
@@ -202,7 +246,7 @@ export const PastRunsView: React.FC = () => {
         }}>
           <button
             type="button"
-            onClick={() => setSelectedRunId(null)}
+            onClick={handleBackToList}
             className="btn"
             style={{ minHeight: '38px', padding: '0 16px', fontSize: '14px' }}
           >
@@ -239,7 +283,7 @@ export const PastRunsView: React.FC = () => {
         <RunView
           runId={selectedRunId}
           onRunCompleted={loadRuns}
-          onCancelRun={() => setSelectedRunId(null)}
+          onCancelRun={handleBackToList}
         />
       </div>
     );
@@ -419,7 +463,7 @@ export const PastRunsView: React.FC = () => {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <button
                     type="button"
-                    onClick={() => setSelectedRunId(r.id)}
+                    onClick={() => handleSelectRun(r.id)}
                     className="btn"
                     style={{ minHeight: '38px', padding: '0 14px' }}
                   >

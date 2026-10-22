@@ -16,6 +16,7 @@ import {
 import { ApprovalPanel } from './ApprovalPanel';
 import { CaptchaModal } from './CaptchaModal';
 import { PdfModal } from './PdfModal';
+import { useConfirm } from './ConfirmModal';
 
 interface RunViewProps {
   runId: string;
@@ -33,6 +34,7 @@ export const RunView: React.FC<RunViewProps> = ({ runId, onRunCompleted, onCance
   const [pollError, setPollError] = useState<string | null>(null);
   const [activePdf, setActivePdf] = useState<{ url: string; title: string } | null>(null);
   const activityListRef = useRef<HTMLOListElement>(null);
+  const { confirm, showAlert } = useConfirm();
 
   // Poll run details and events every 1.5 seconds
   useEffect(() => {
@@ -93,7 +95,7 @@ export const RunView: React.FC<RunViewProps> = ({ runId, onRunCompleted, onCance
       setCandidates(cand);
       setEvents(evs);
     } catch (err: any) {
-      alert(err.message || 'Failed to submit approval');
+      await showAlert('Approval Error', err.message || 'Failed to submit approval');
     } finally {
       setApproving(false);
     }
@@ -237,7 +239,13 @@ export const RunView: React.FC<RunViewProps> = ({ runId, onRunCompleted, onCance
       return;
     }
 
-    const confirmed = window.confirm("Are you sure you want to cancel this collection run? Any ongoing downloads will be stopped.");
+    const confirmed = await confirm({
+      title: 'Cancel Collection Run',
+      message: 'Are you sure you want to cancel this collection run? Any ongoing downloads will be stopped.',
+      confirmText: 'Cancel Run',
+      cancelText: 'Keep Running',
+      isDanger: true,
+    });
     if (!confirmed) return;
 
     try {
@@ -253,7 +261,7 @@ export const RunView: React.FC<RunViewProps> = ({ runId, onRunCompleted, onCance
       setEvents(evs);
     } catch (err: any) {
       console.error("Cancel run error:", err);
-      alert("Failed to cancel run: " + (err.message || String(err)));
+      await showAlert('Failed to Cancel Run', err.message || String(err));
     } finally {
       setCancelling(false);
     }
@@ -602,7 +610,25 @@ export const RunView: React.FC<RunViewProps> = ({ runId, onRunCompleted, onCance
                     <tr key={c.id} style={{ borderBottom: '1px solid var(--border-color)' }}>
                       <td style={{ padding: '12px 14px', fontWeight: 600, color: 'var(--text-main)' }}>{getLabName(c.lab)}</td>
                       <td style={{ padding: '12px 14px', color: 'var(--text-main)', fontWeight: 600 }}>
-                        {c.x_test || c.listing_title}
+                        <div>{c.x_test || c.listing_title}</div>
+                        {c.decision_reason && (
+                          <div style={{
+                            fontSize: '12px',
+                            fontWeight: 500,
+                            color: c.decision === 'keep' ? 'var(--text-dim)' : c.decision === 'duplicate' ? '#93c5fd' : '#fca5a5',
+                            marginTop: '4px',
+                            lineHeight: 1.35,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px'
+                          }}>
+                            {c.decision === 'keep' ? (
+                              <span>✓ {c.decision_reason}</span>
+                            ) : (
+                              <span>⚠️ <strong>Reason:</strong> {c.decision_reason}</span>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td style={{ padding: '12px 14px', color: 'var(--text-muted)' }}>
                         {c.x_report_id || c.portal_report_id}

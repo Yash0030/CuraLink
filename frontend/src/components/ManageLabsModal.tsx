@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { X, Plus, Trash2, Globe, Lock, ShieldCheck, Building2 } from 'lucide-react';
 import type { LabInfo } from '../types';
 import { addCustomLab, deleteCustomLab } from '../api';
+import { useConfirm } from './ConfirmModal';
 
 interface ManageLabsModalProps {
   labs: LabInfo[];
@@ -16,6 +17,7 @@ export const ManageLabsModal: React.FC<ManageLabsModalProps> = ({
   onClose,
   onLabsUpdated,
 }) => {
+  const { confirm, showAlert } = useConfirm();
   const [isAdding, setIsAdding] = useState(false);
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
@@ -61,13 +63,20 @@ export const ManageLabsModal: React.FC<ManageLabsModalProps> = ({
   };
 
   const handleDelete = async (labKey: string, labName: string) => {
-    if (!window.confirm(`Are you sure you want to remove ${labName}?`)) return;
+    const confirmed = await confirm({
+      title: 'Remove Lab Portal',
+      message: `Are you sure you want to remove "${labName}"?`,
+      confirmText: 'Remove Lab',
+      cancelText: 'Cancel',
+      isDanger: true,
+    });
+    if (!confirmed) return;
     try {
       setDeletingKey(labKey);
       await deleteCustomLab(labKey);
       await onLabsUpdated();
     } catch (err: any) {
-      alert(err.message || 'Failed to delete lab');
+      await showAlert('Failed to Remove Lab', err.message || 'Failed to delete lab');
     } finally {
       setDeletingKey(null);
     }
@@ -342,11 +351,6 @@ export const ManageLabsModal: React.FC<ManageLabsModalProps> = ({
                       <span className="tag">
                         {lab.layout}
                       </span>
-                      {lab.has_captcha && (
-                        <span className="tag cap">
-                          CAPTCHA
-                        </span>
-                      )}
                     </div>
                     <div style={{ fontSize: '13px', color: '#4A5A6E', marginTop: '4px' }}>
                       Endpoint: {lab.reports_path}

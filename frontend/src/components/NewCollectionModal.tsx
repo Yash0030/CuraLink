@@ -297,7 +297,6 @@ export const NewCollectionModal: React.FC<NewCollectionModalProps> = ({
                         {lab.name}
                       </label>
                       <span className="tag">{tagLabel}</span>
-                      {lab.has_captcha && <span className="tag cap">CAPTCHA</span>}
                     </div>
 
                     {cred.enabled && (

@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import { ConfirmProvider } from './components/ConfirmModal'
 
 // Clean up any stale Service Workers or caches left on localhost from previous projects
 if ('serviceWorker' in navigator) {
@@ -21,7 +22,9 @@ if ('caches' in window) {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <ConfirmProvider>
+      <App />
+    </ConfirmProvider>
   </StrictMode>,
 )
 

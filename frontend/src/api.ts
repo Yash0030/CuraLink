@@ -76,7 +76,13 @@ export async function fetchCurrentUser(): Promise<UserProfile | null> {
     setAuthToken(null);
     return null;
   }
-  return res.json();
+  const data = await res.json();
+  const profile = data.user || data;
+  if (!profile || !profile.name) {
+    // If name is nested or stored in token
+    return profile;
+  }
+  return profile;
 }
 
 export async function logout(): Promise<void> {

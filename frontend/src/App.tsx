@@ -10,9 +10,24 @@ import type { LabInfo, UserProfile, RunSummary } from './types';
 import { fetchLabs, createNewRun, fetchCurrentUser, logout, fetchAllRuns } from './api';
 import { ShieldCheck, Lock, Sun, Moon } from 'lucide-react';
 
+const getTabFromHash = (): 'current' | 'history' | 'timeline' => {
+  const hash = window.location.hash.toLowerCase();
+  if (hash.startsWith('#timeline')) return 'timeline';
+  if (hash.startsWith('#past-runs') || hash.startsWith('#history')) return 'history';
+  return 'current';
+};
+
+const getRunIdFromHash = (): string | null => {
+  const hash = window.location.hash;
+  if (hash.startsWith('#run/')) {
+    return hash.replace('#run/', '') || null;
+  }
+  return null;
+};
+
 export function App() {
-  const [activeTab, setActiveTab] = useState<'current' | 'history' | 'timeline'>('current');
-  const [currentRunId, setCurrentRunId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'current' | 'history' | 'timeline'>(getTabFromHash);
+  const [currentRunId, setCurrentRunId] = useState<string | null>(getRunIdFromHash);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isLabsModalOpen, setIsLabsModalOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -37,6 +52,49 @@ export function App() {
   const toggleTheme = () => {
     setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
   };
+
+  // Browser History & Home Page Routing Setup
+  useEffect(() => {
+    // Treat Active Run as the Home page root
+    // Using replaceState ensures the browser's Back button is disabled/not enabled on initial Home page load!
+    const hash = window.location.hash;
+    if (!hash || hash === '#' || hash === '#active-run' || hash === '#current') {
+      window.history.replaceState({ tab: 'current' }, '', window.location.pathname);
+    } else if (hash.startsWith('#timeline')) {
+      window.history.replaceState({ tab: 'timeline' }, '', '#timeline');
+    } else if (hash.startsWith('#past-runs') || hash.startsWith('#history')) {
+      window.history.replaceState({ tab: 'history' }, '', window.location.hash);
+    } else if (hash.startsWith('#run/')) {
+      window.history.replaceState({ tab: 'current', runId: hash.replace('#run/', '') }, '', hash);
+    }
+
+    const handlePopState = () => {
+      const nextTab = getTabFromHash();
+      const nextRunId = getRunIdFromHash();
+      setActiveTab(nextTab);
+      if (nextRunId) {
+        setCurrentRunId(nextRunId);
+      } else if (nextTab === 'current' && !window.location.hash.startsWith('#run/')) {
+        // Back to home page root
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const handleTabChange = useCallback((tab: 'current' | 'history' | 'timeline') => {
+    setActiveTab(tab);
+    if (tab === 'timeline') {
+      window.history.pushState({ tab: 'timeline' }, '', '#timeline');
+    } else if (tab === 'history') {
+      window.history.pushState({ tab: 'history' }, '', '#past-runs');
+    } else {
+      // Home page (Active run)
+      const targetUrl = currentRunId ? `#run/${currentRunId}` : window.location.pathname;
+      window.history.pushState({ tab: 'current', runId: currentRunId }, '', targetUrl);
+    }
+  }, [currentRunId]);
 
   const refreshLabs = useCallback(async () => {
     try {
@@ -85,6 +143,13 @@ export function App() {
     const res = await createNewRun(data);
     setCurrentRunId(res.run_id);
     setActiveTab('current');
+    window.history.pushState({ tab: 'current', runId: res.run_id }, '', '#run/' + res.run_id);
+    refreshRuns();
+  };
+
+  const handleCancelRun = () => {
+    setCurrentRunId(null);
+    window.history.replaceState({ tab: 'current' }, '', window.location.pathname);
     refreshRuns();
   };
 
@@ -127,7 +192,7 @@ export function App() {
       {/* Left Sidebar Navigation */}
       <Navbar
         activeTab={activeTab}
-        onTabChange={setActiveTab}
+        onTabChange={handleTabChange}
         onOpenNewCollection={() => {
           if (!currentUser) {
             setIsAuthModalOpen(true);
@@ -237,10 +302,7 @@ export function App() {
                   onRunCompleted={() => {
                     refreshRuns();
                   }}
-                  onCancelRun={() => {
-                    setCurrentRunId(null);
-                    refreshRuns();
-                  }}
+                  onCancelRun={handleCancelRun}
                 />
               ) : (
                 /* Matches A_ActiveEmpty.dc.html exactly */
@@ -294,7 +356,7 @@ export function App() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => setActiveTab('timeline')}
+                        onClick={() => handleTabChange('timeline')}
                         className="btn"
                       >
                         View health timeline

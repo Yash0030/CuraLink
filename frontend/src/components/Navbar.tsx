@@ -23,7 +23,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   currentUser,
   hasActiveRun
 }) => {
-  const initial = currentUser?.name ? currentUser.name.charAt(0).toUpperCase() : 'U';
+  const displayName = currentUser?.name?.trim() || (currentUser as any)?.user?.name?.trim() || (currentUser?.email ? currentUser.email.split('@')[0] : 'User');
+  const displayEmail = currentUser?.email || (currentUser as any)?.user?.email || '';
+  const initial = displayName ? displayName.charAt(0).toUpperCase() : 'U';
 
   return (
     <aside style={{
@@ -42,8 +44,15 @@ export const Navbar: React.FC<NavbarProps> = ({
       zIndex: 50,
       transition: 'background-color 0.2s ease, border-color 0.2s ease'
     }}>
-      {/* Brand Logo & Title */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+      {/* Brand Logo & Title (Navigates to Home) */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => onTabChange('current')}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onTabChange('current'); }}
+        title="Go to Home (Active run)"
+        style={{ display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer', outline: 'none' }}
+      >
         <div style={{
           width: '40px',
           height: '40px',
@@ -145,11 +154,13 @@ export const Navbar: React.FC<NavbarProps> = ({
 
             <div style={{ flex: 1, minWidth: 0, lineHeight: 1.3 }}>
               <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {currentUser.name}
+                {displayName}
               </div>
-              <div style={{ fontSize: '12px', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {currentUser.email}
-              </div>
+              {displayEmail && (
+                <div style={{ fontSize: '12px', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {displayEmail}
+                </div>
+              )}
             </div>
 
             <button

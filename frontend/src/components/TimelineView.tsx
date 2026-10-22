@@ -52,7 +52,7 @@ export const TimelineView: React.FC = () => {
           <h1 style={{ margin: 0, fontSize: '30px', lineHeight: 1.15, fontWeight: 700, letterSpacing: '-0.01em' }}>
             Health timeline
           </h1>
-          <p style={{ margin: '8px 0 0', fontSize: '15px', lineHeight: 1.5, color: '#3A4A5E' }}>
+          <p style={{ margin: '8px 0 0', fontSize: '15px', lineHeight: 1.5, color: 'var(--text-muted)' }}>
             Chronological, deduplicated medical record consolidated across all lab portals.
           </p>
         </header>

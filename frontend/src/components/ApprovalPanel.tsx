@@ -12,6 +12,7 @@ import {
 import type { CandidateItem } from '../types';
 import { getPdfFileUrl } from '../api';
 import { PdfModal } from './PdfModal';
+import { useConfirm } from './ConfirmModal';
 
 interface ApprovalPanelProps {
   candidates: CandidateItem[];
@@ -20,6 +21,7 @@ interface ApprovalPanelProps {
 }
 
 export const ApprovalPanel: React.FC<ApprovalPanelProps> = ({ candidates, onApprove, loading }) => {
+  const { confirm } = useConfirm();
   // Store user decisions per candidate: candidate_id -> "keep" | "reject"
   const [overrides, setOverrides] = useState<Record<string, 'keep' | 'reject'>>({});
   // Set of selected candidate IDs (for bulk selection and bulk actions)
@@ -127,7 +129,14 @@ export const ApprovalPanel: React.FC<ApprovalPanelProps> = ({ candidates, onAppr
     setError(null);
 
     if (totalWillBeSaved === 0) {
-      if (window.confirm("No PDF reports are marked to be saved. Reject this collection run?")) {
+      const confirmed = await confirm({
+        title: 'Reject Collection Run',
+        message: 'No PDF reports are marked to be saved. Reject this collection run?',
+        confirmText: 'Reject Run',
+        cancelText: 'Keep Editing',
+        isDanger: true,
+      });
+      if (confirmed) {
         await onApprove(false, {});
       }
       return;
@@ -143,7 +152,14 @@ export const ApprovalPanel: React.FC<ApprovalPanelProps> = ({ candidates, onAppr
   };
 
   const handleRejectEntireRun = async () => {
-    if (window.confirm("Are you sure you want to reject this entire collection run? None of the reports will be saved.")) {
+    const confirmed = await confirm({
+      title: 'Reject Entire Collection Run',
+      message: 'Are you sure you want to reject this entire collection run? None of the reports will be saved.',
+      confirmText: 'Reject All Reports',
+      cancelText: 'Cancel',
+      isDanger: true,
+    });
+    if (confirmed) {
       await onApprove(false, {});
     }
   };
@@ -300,8 +316,36 @@ export const ApprovalPanel: React.FC<ApprovalPanelProps> = ({ candidates, onAppr
             </div>
 
             {c.decision_reason && (
-              <div style={{ fontSize: '12.5px', color: 'var(--text-dim)', marginTop: '3px' }}>
-                Reason: {c.decision_reason}
+              <div style={{
+                fontSize: '12.5px',
+                marginTop: '6px',
+                padding: '6px 12px',
+                borderRadius: '8px',
+                background: c.decision === 'duplicate'
+                  ? 'rgba(59, 130, 246, 0.12)'
+                  : c.decision === 'keep'
+                  ? 'rgba(20, 184, 166, 0.08)'
+                  : 'rgba(239, 68, 68, 0.12)',
+                border: c.decision === 'duplicate'
+                  ? '1px solid rgba(59, 130, 246, 0.28)'
+                  : c.decision === 'keep'
+                  ? '1px solid rgba(20, 184, 166, 0.22)'
+                  : '1px solid rgba(239, 68, 68, 0.28)',
+                color: c.decision === 'duplicate'
+                  ? '#93c5fd'
+                  : c.decision === 'keep'
+                  ? 'var(--primary)'
+                  : '#fca5a5',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                lineHeight: 1.35
+              }}>
+                <AlertTriangle size={14} style={{ flexShrink: 0 }} />
+                <span>
+                  <strong>{c.decision === 'duplicate' ? 'Duplicate Report:' : c.decision === 'keep' ? 'Validation:' : 'Rejection Reason:'}</strong>{' '}
+                  {c.decision_reason}
+                </span>
               </div>
             )}
           </div>
