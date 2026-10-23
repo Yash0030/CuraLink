@@ -119,6 +119,7 @@ class LabFetcherAgent:
         page = None
         staged_candidates = []
         error_msg = None
+        is_login_failure = False
 
         try:
             portal_base = get_effective_portal_base()
@@ -132,18 +133,39 @@ class LabFetcherAgent:
         except Exception as e:
             error_msg = str(e)
             logger.error(f"[{self.lab}] Browser fetch sequence encountered an error: {e}", exc_info=True)
-            await safe_db_call(
-                Repository.record_event(
-                    self.run_id, f"Fetcher-{self.lab}", "WARNING",
-                    f"Browser fetch encountered an issue on {self.display_name}: {e}"
-                ),
-                main_loop
-            )
 
-            # Fallback: if browser couldn't reach portal, stage synthetic test documents directly
-            if not staged_candidates:
-                logger.info(f"[{self.lab}] Initiating synthetic fallback staging to ensure pipeline progression...")
-                staged_candidates = await self._stage_synthetic_fallback(main_loop)
+            # Detect explicit login / authentication failure (e.g. wrong password)
+            err_str = str(e).lower()
+            is_login_failure = any(term in err_str for term in [
+                "login failed", "invalid credentials", "incorrect username",
+                "authentication failed", "password"
+            ])
+
+            if is_login_failure:
+                # Log a clear, unambiguous ERROR event for the user & audit log
+                await safe_db_call(
+                    Repository.record_event(
+                        self.run_id, f"Fetcher-{self.lab}", "ERROR",
+                        f"Login failed on {self.display_name}: Invalid credentials. Authentication rejected."
+                    ),
+                    main_loop
+                )
+                logger.warning(f"[{self.lab}] Explicit authentication failure on {self.display_name}. Staging 0 documents.")
+                # DO NOT fall back to synthetic staging for explicit login rejections!
+                staged_candidates = []
+            else:
+                await safe_db_call(
+                    Repository.record_event(
+                        self.run_id, f"Fetcher-{self.lab}", "WARNING",
+                        f"Browser fetch encountered an issue on {self.display_name}: {e}"
+                    ),
+                    main_loop
+                )
+
+                # Fallback: ONLY if browser couldn't reach portal over network (offline / timeout)
+                if not staged_candidates:
+                    logger.info(f"[{self.lab}] Initiating synthetic fallback staging to ensure pipeline progression...")
+                    staged_candidates = await self._stage_synthetic_fallback(main_loop)
 
         finally:
             # Always close browser sessions in a finally block
@@ -158,14 +180,17 @@ class LabFetcherAgent:
             except Exception as close_err:
                 logger.warning(f"[{self.lab}] Error closing browser session: {close_err}")
 
-        logger.info(f"[{self.lab}] Fetch worker finished. Total staged documents: {len(staged_candidates)}")
-        await safe_db_call(
-            Repository.record_event(
-                self.run_id, f"Fetcher-{self.lab}", "INFO",
-                f"Fetch worker completed for {self.display_name}. Staged {len(staged_candidates)} documents."
-            ),
-            main_loop
-        )
+        if not is_login_failure:
+            logger.info(f"[{self.lab}] Fetch worker finished. Total staged documents: {len(staged_candidates)}")
+            await safe_db_call(
+                Repository.record_event(
+                    self.run_id, f"Fetcher-{self.lab}", "INFO",
+                    f"Fetch worker completed for {self.display_name}. Staged {len(staged_candidates)} documents."
+                ),
+                main_loop
+            )
+        else:
+            logger.info(f"[{self.lab}] Fetch worker finished due to authentication rejection (0 documents staged).")
 
         return {
             "lab": self.lab,

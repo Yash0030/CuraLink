@@ -128,6 +128,30 @@ export const PastRunsView: React.FC = () => {
     }).join(', ');
   };
 
+  const getTestCaseBadge = (r: RunSummary) => {
+    const id = (r.patient_id || '').toLowerCase();
+    const name = (r.patient_name || '').toLowerCase();
+    if (name.includes('tc1') || id === 'pt001') {
+      return <span style={{ background: '#2563eb', color: '#fff', fontSize: '10.5px', fontWeight: 700, padding: '2px 7px', borderRadius: '4px', letterSpacing: '0.02em' }}>TC1: Multi-Lab</span>;
+    }
+    if (name.includes('tc2') || id === 'pt002') {
+      return <span style={{ background: '#7c3aed', color: '#fff', fontSize: '10.5px', fontWeight: 700, padding: '2px 7px', borderRadius: '4px', letterSpacing: '0.02em' }}>TC2: Dedup</span>;
+    }
+    if (name.includes('tc3b') || id === 'pt006') {
+      return <span style={{ background: '#059669', color: '#fff', fontSize: '10.5px', fontWeight: 700, padding: '2px 7px', borderRadius: '4px', letterSpacing: '0.02em' }}>TC3b: Name Collision</span>;
+    }
+    if (name.includes('tc3') || id === 'pt003') {
+      return <span style={{ background: '#d97706', color: '#fff', fontSize: '10.5px', fontWeight: 700, padding: '2px 7px', borderRadius: '4px', letterSpacing: '0.02em' }}>TC3: Wrong Patient</span>;
+    }
+    if (name.includes('tc4') || id === 'pt004') {
+      return <span style={{ background: '#dc2626', color: '#fff', fontSize: '10.5px', fontWeight: 700, padding: '2px 7px', borderRadius: '4px', letterSpacing: '0.02em' }}>TC4: Non-PDF</span>;
+    }
+    if (name.includes('tc5') || name.includes('mismatch') || id === 'pt005') {
+      return <span style={{ background: '#4f46e5', color: '#fff', fontSize: '10.5px', fontWeight: 700, padding: '2px 7px', borderRadius: '4px', letterSpacing: '0.02em' }}>Date Mismatch</span>;
+    }
+    return null;
+  };
+
   const toggleSelect = (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     setSelectedIds(prev => {
@@ -430,7 +454,10 @@ export const PastRunsView: React.FC = () => {
                 </button>
 
                 <div style={{ flex: '1 1 190px', display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-start' }}>
-                  <div style={{ fontSize: '17px', fontWeight: 650, color: 'var(--text-main)' }}>{r.patient_name}</div>
+                  <div style={{ fontSize: '17px', fontWeight: 650, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <span>{r.patient_name}</span>
+                    {getTestCaseBadge(r)}
+                  </div>
                   <span className={`status ${meta.cls}`}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                       <path d={meta.icon}></path>

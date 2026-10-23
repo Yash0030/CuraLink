@@ -1,6 +1,115 @@
 import React, { useState, useEffect } from 'react';
-import { X } from 'lucide-react';
+import { X, Sparkles, Check } from 'lucide-react';
 import type { LabInfo, LabLoginCredential, UserProfile } from '../types';
+
+interface DemoPreset {
+  id: string;
+  badge: string;
+  badgeColor: string;
+  title: string;
+  patient_name: string;
+  patient_id: string;
+  date_from: string;
+  date_to: string;
+  labs: string[];
+  username: string;
+  password: string;
+  tag: string;
+  hint: string;
+}
+
+const DEMO_PRESETS: DemoPreset[] = [
+  {
+    id: 'tc1',
+    badge: 'TC1',
+    badgeColor: '#2563eb',
+    title: 'Aarav Roy (PT001)',
+    patient_name: 'Aarav Roy',
+    patient_id: 'PT001',
+    date_from: '2026-01-01',
+    date_to: '2026-04-30',
+    labs: ['labA', 'labB', 'labC'],
+    username: 'pt001',
+    password: 'demo123',
+    tag: '3 Portals Sync',
+    hint: '6 reports verified & merged into 1 timeline'
+  },
+  {
+    id: 'tc2',
+    badge: 'TC2',
+    badgeColor: '#7c3aed',
+    title: 'Reyansh Reddy (PT002)',
+    patient_name: 'Reyansh Reddy',
+    patient_id: 'PT002',
+    date_from: '2026-01-01',
+    date_to: '2026-04-30',
+    labs: ['labA'],
+    username: 'pt002',
+    password: 'demo123',
+    tag: 'Duplicate Dedup',
+    hint: 'Exact duplicate flagged; stored once in timeline'
+  },
+  {
+    id: 'tc3',
+    badge: 'TC3',
+    badgeColor: '#d97706',
+    title: 'Gopal Chauhan (PT003)',
+    patient_name: 'Gopal Chauhan',
+    patient_id: 'PT003',
+    date_from: '2026-01-01',
+    date_to: '2026-04-30',
+    labs: ['labB'],
+    username: 'pt003',
+    password: 'demo123',
+    tag: 'Wrong Patient',
+    hint: 'Foreign report (Diya Ghosh) auto-excluded'
+  },
+  {
+    id: 'tc3b',
+    badge: 'TC3b',
+    badgeColor: '#059669',
+    title: 'Anita Sharma (PT006)',
+    patient_name: 'Anita Sharma',
+    patient_id: 'PT006',
+    date_from: '2026-01-01',
+    date_to: '2026-04-30',
+    labs: ['labB'],
+    username: 'pt006',
+    password: 'demo123',
+    tag: 'Name Collision',
+    hint: 'Look-alike name ("Anita Sharma-Rao") excluded'
+  },
+  {
+    id: 'tc4',
+    badge: 'TC4',
+    badgeColor: '#dc2626',
+    title: 'Aditya Malhotra (PT004)',
+    patient_name: 'Aditya Malhotra',
+    patient_id: 'PT004',
+    date_from: '2026-01-01',
+    date_to: '2026-04-30',
+    labs: ['labC'],
+    username: 'pt004',
+    password: 'demo123',
+    tag: 'Corrupt / Non-PDF',
+    hint: 'HTML masked as PDF auto-rejected'
+  },
+  {
+    id: 'date-mismatch',
+    badge: 'Bonus',
+    badgeColor: '#4f46e5',
+    title: 'Mohan Chopra (PT005)',
+    patient_name: 'Mohan Chopra',
+    patient_id: 'PT005',
+    date_from: '2026-01-01',
+    date_to: '2026-04-30',
+    labs: ['labA'],
+    username: 'pt005',
+    password: 'demo123',
+    tag: 'Date Mismatch',
+    hint: 'Portal 4-Apr vs PDF 1-Apr -> Review'
+  }
+];
 
 interface NewCollectionModalProps {
   labs: LabInfo[];
@@ -31,6 +140,7 @@ export const NewCollectionModal: React.FC<NewCollectionModalProps> = ({
   const [dateTo, setDateTo] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
 
   const [logins, setLogins] = useState<Record<string, LabLoginCredential>>({});
 
@@ -55,6 +165,28 @@ export const NewCollectionModal: React.FC<NewCollectionModalProps> = ({
       setPatientName(currentUser.name);
     }
   }, [isOpen, currentUser]);
+
+  const handleApplyPreset = (preset: DemoPreset) => {
+    setActivePresetId(preset.id);
+    setPatientName(preset.patient_name);
+    setPatientId(preset.patient_id);
+    setDateFrom(preset.date_from);
+    setDateTo(preset.date_to);
+    setError(null);
+
+    setLogins(prev => {
+      const next: Record<string, LabLoginCredential> = {};
+      labs.forEach(lab => {
+        const isSelected = preset.labs.includes(lab.key);
+        next[lab.key] = {
+          enabled: isSelected,
+          username: isSelected ? preset.username : (prev[lab.key]?.username || lab.default_username || ''),
+          password: isSelected ? preset.password : (prev[lab.key]?.password || lab.default_password || ''),
+        };
+      });
+      return next;
+    });
+  };
 
   if (!isOpen) return null;
 
@@ -127,7 +259,7 @@ export const NewCollectionModal: React.FC<NewCollectionModalProps> = ({
         onClick={e => e.stopPropagation()}
         style={{
           width: '100%',
-          maxWidth: '680px',
+          maxWidth: '720px',
           boxSizing: 'border-box',
           background: 'var(--bg-card)',
           border: '1px solid var(--border-color)',
@@ -150,13 +282,13 @@ export const NewCollectionModal: React.FC<NewCollectionModalProps> = ({
           alignItems: 'flex-start',
           justifyContent: 'space-between',
           gap: '16px',
-          padding: '28px 32px 20px'
+          padding: '28px 32px 18px'
         }}>
           <div>
             <h1 id="dlg" style={{ margin: 0, fontSize: '24px', fontWeight: 700, letterSpacing: '-0.01em', color: 'var(--text-main)' }}>
               Start a new collection
             </h1>
-            <p style={{ margin: '6px 0 0', fontSize: '14.5px', lineHeight: 1.5, color: 'var(--text-muted)', maxWidth: '460px' }}>
+            <p style={{ margin: '6px 0 0', fontSize: '14.5px', lineHeight: 1.5, color: 'var(--text-muted)', maxWidth: '480px' }}>
               Your assistant signs in to each lab you pick, downloads matching reports and checks them before adding them to the timeline.
             </p>
           </div>
@@ -170,6 +302,121 @@ export const NewCollectionModal: React.FC<NewCollectionModalProps> = ({
             <X size={18} strokeWidth={2} />
           </button>
         </header>
+
+        {/* Quick Load Test Scenarios strip */}
+        <div
+          data-testid="quick-demo-presets-strip"
+          style={{
+            margin: '0 32px 18px',
+            padding: '14px 16px',
+            borderRadius: '14px',
+            background: 'var(--bg-subtle)',
+            border: '1px solid var(--border-color)',
+          }}
+        >
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '8px',
+            marginBottom: '10px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '24px',
+                height: '24px',
+                borderRadius: '6px',
+                background: 'var(--primary)',
+                color: '#ffffff'
+              }}>
+                <Sparkles size={13} />
+              </div>
+              <span style={{ fontSize: '13.5px', fontWeight: 700, color: 'var(--text-main)', letterSpacing: '-0.01em' }}>
+                Quick Load Test Scenarios
+              </span>
+              <span style={{
+                fontSize: '11px',
+                fontWeight: 600,
+                padding: '2px 8px',
+                borderRadius: '999px',
+                background: 'var(--primary-light)',
+                color: 'var(--primary-dark)',
+              }}>
+                1-Click Preset
+              </span>
+            </div>
+            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+              Password preset: <code style={{ font: '600 11px var(--font-mono, monospace)', background: 'var(--bg-card)', padding: '2px 6px', borderRadius: '4px', border: '1px solid var(--border-color)' }}>demo123</code>
+            </span>
+          </div>
+
+          {/* Preset Buttons Grid */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(195px, 1fr))',
+            gap: '8px'
+          }}>
+            {DEMO_PRESETS.map(preset => {
+              const isSelected = activePresetId === preset.id;
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  data-testid={`preset-${preset.id}`}
+                  onClick={() => handleApplyPreset(preset)}
+                  title={`Click to load ${preset.title}: ${preset.hint}`}
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'flex-start',
+                    gap: '4px',
+                    padding: '8px 10px',
+                    borderRadius: '10px',
+                    border: isSelected ? '1.5px solid var(--primary)' : '1px solid var(--border-color)',
+                    background: isSelected ? 'var(--primary-light)' : 'var(--bg-card)',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    transition: 'all 0.15s ease',
+                    boxShadow: isSelected ? '0 0 0 1px var(--primary)' : 'none'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                    <span style={{
+                      fontSize: '10.5px',
+                      fontWeight: 700,
+                      padding: '1.5px 6px',
+                      borderRadius: '4px',
+                      background: preset.badgeColor,
+                      color: '#ffffff',
+                      letterSpacing: '0.02em'
+                    }}>
+                      {preset.badge}
+                    </span>
+                    {isSelected ? (
+                      <span style={{ display: 'flex', alignItems: 'center', gap: '3px', fontSize: '10.5px', fontWeight: 700, color: 'var(--primary)' }}>
+                        <Check size={12} strokeWidth={3} /> Selected
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: '10.5px', color: 'var(--text-dim)', fontWeight: 500 }}>
+                        {preset.tag}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: '12.5px', fontWeight: 650, color: 'var(--text-main)', marginTop: '2px', lineHeight: 1.25 }}>
+                    {preset.title}
+                  </div>
+                  <div style={{ fontSize: '10.5px', color: 'var(--text-muted)', lineHeight: 1.2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' }}>
+                    {preset.hint}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
         {error && (
           <div style={{

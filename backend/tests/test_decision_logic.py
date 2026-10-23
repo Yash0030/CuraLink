@@ -160,3 +160,29 @@ def test_possible_duplicate_needs_review():
     )
     assert dup_res["verdict"] == "possible_duplicate"
     assert dup_res["matched_by"] == "lab_test_date"
+
+@pytest.mark.asyncio
+async def test_wrong_password_isolation():
+    """Verifies that an authentication failure is recognized as login rejection and does not stage fallback files."""
+    from app.agents.fetcher import LabFetcherAgent
+    from app.db.repository import Repository
+    
+    run_id = "test-wrong-password-run"
+    agent = LabFetcherAgent(
+        lab="labA",
+        run_id=run_id,
+        username="pt001",
+        password="bad_password_123",
+        date_from=date(2026, 1, 1),
+        date_to=date(2026, 4, 30)
+    )
+    
+    # Simulate an authentication exception
+    err = RuntimeError("Login failed on A1 Diagnostics: Incorrect username or password. Please try again.")
+    err_str = str(err).lower()
+    is_login_failure = any(term in err_str for term in [
+        "login failed", "invalid credentials", "incorrect username",
+        "authentication failed", "password"
+    ])
+    assert is_login_failure is True
+

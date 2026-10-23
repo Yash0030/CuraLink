@@ -242,31 +242,37 @@ export const ApprovalPanel: React.FC<ApprovalPanelProps> = ({ candidates, onAppr
                 {c.x_test || c.listing_title || 'Medical Report'}
               </span>
 
-              {/* View PDF Button */}
+              {/* Clickable PDF Filename button */}
               <button
                 type="button"
                 onClick={() =>
                   setActivePdf({
                     url: pdfUrl,
-                    title: `${c.x_test || c.listing_title || 'Report'} (${c.lab})`
+                    title: `${c.filename} — ${c.x_test || c.listing_title || 'Report'} (${c.lab})`
                   })
                 }
+                title={`Click filename ${c.filename} to preview PDF`}
+                data-testid={`btn-view-pdf-${c.id}`}
                 style={{
-                  background: 'var(--primary-light)',
-                  border: '1px solid var(--border-strong)',
-                  color: 'var(--primary-dark)',
+                  background: 'rgba(20, 184, 166, 0.08)',
+                  border: '1px solid rgba(20, 184, 166, 0.28)',
+                  color: 'var(--primary)',
                   display: 'inline-flex',
                   alignItems: 'center',
-                  gap: '4px',
+                  gap: '5px',
                   fontSize: '12px',
-                  fontWeight: 600,
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                  fontWeight: 650,
                   padding: '3px 8px',
                   borderRadius: '6px',
-                  cursor: 'pointer'
+                  cursor: 'pointer',
+                  textDecoration: 'underline',
+                  textUnderlineOffset: '2px',
+                  transition: 'all 0.15s ease'
                 }}
               >
-                <FileText size={12} />
-                <span>View PDF</span>
+                <FileText size={13} style={{ flexShrink: 0 }} />
+                <span>{c.filename}</span>
               </button>
 
               {/* Decision Badge */}
@@ -307,12 +313,38 @@ export const ApprovalPanel: React.FC<ApprovalPanelProps> = ({ candidates, onAppr
               )}
             </div>
 
-            <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '3px' }}>
-              <span>ID: {c.x_report_id || c.portal_report_id || 'N/A'}</span>
-              <span style={{ margin: '0 6px' }}>•</span>
-              <span>Date: {c.x_date || c.portal_date || 'N/A'}</span>
-              <span style={{ margin: '0 6px' }}>•</span>
-              <span>Patient: {c.x_name || 'N/A'}</span>
+            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px 8px', fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
+              <span>ID: <strong style={{ color: 'var(--text-main)', fontWeight: 600 }}>{c.x_report_id || c.portal_report_id || 'N/A'}</strong></span>
+              <span>•</span>
+              <span>Date: <strong style={{ color: 'var(--text-main)', fontWeight: 600 }}>{c.x_date || c.portal_date || 'N/A'}</strong></span>
+              <span>•</span>
+              <span>Patient: <strong style={{ color: 'var(--text-main)', fontWeight: 600 }}>{c.x_name || 'N/A'}</strong></span>
+              <span>•</span>
+              <button
+                type="button"
+                onClick={() =>
+                  setActivePdf({
+                    url: pdfUrl,
+                    title: `${c.filename} — ${c.x_test || c.listing_title || 'Report'} (${c.lab})`
+                  })
+                }
+                title={`Open and inspect ${c.filename}`}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  color: 'var(--primary)',
+                  cursor: 'pointer',
+                  fontSize: '12.5px',
+                  fontWeight: 600,
+                  textDecoration: 'underline',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '3px'
+                }}
+              >
+                Inspect file &rarr;
+              </button>
             </div>
 
             {c.decision_reason && (

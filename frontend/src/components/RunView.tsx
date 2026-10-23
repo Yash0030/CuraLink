@@ -2,7 +2,12 @@ import React, { useEffect, useState, useRef } from 'react';
 import {
   FileCheck2,
   ShieldCheck,
-  AlertCircle
+  AlertCircle,
+  CheckCircle2,
+  Copy,
+  Ban,
+  XCircle,
+  AlertTriangle
 } from 'lucide-react';
 import type { RunDetailsResponse, CandidateItem, EventLogItem } from '../types';
 import {
@@ -271,6 +276,12 @@ export const RunView: React.FC<RunViewProps> = ({ runId, onRunCompleted, onCance
   const getLabStatus = (labId: string) => {
     const isWaitingCaptcha = waitingCaptchaLab === labId;
     const labEvents = events.filter(e => e.agent?.toLowerCase().includes(labId.toLowerCase()) || e.message.toLowerCase().includes(labId.toLowerCase()));
+    
+    const hasLoginFailed = labEvents.some(e => e.level === 'ERROR' && (e.message.toLowerCase().includes('login failed') || e.message.toLowerCase().includes('authentication') || e.message.toLowerCase().includes('credentials')));
+    if (hasLoginFailed) {
+      return { state: 'error', text: 'Authentication failed (invalid credentials)' };
+    }
+
     const hasFinished = labEvents.some(e => e.message.toLowerCase().includes('done') || e.message.toLowerCase().includes('downloaded') || e.message.toLowerCase().includes('complete'));
     const isWorking = isWaitingCaptcha || labEvents.some(e => e.message.toLowerCase().includes('login') || e.message.toLowerCase().includes('signed in') || e.message.toLowerCase().includes('found'));
 
@@ -331,7 +342,26 @@ export const RunView: React.FC<RunViewProps> = ({ runId, onRunCompleted, onCance
     progressPct = 100;
   }
 
-  const labsCompletedCount = run.labs.filter(l => getLabStatus(l).state === 'done').length;
+  const labsCompletedCount = run.labs.filter(l => {
+    const st = getLabStatus(l).state;
+    return st === 'done' || st === 'error';
+  }).length;
+
+  const candidateCounts = {
+    keep: candidates.filter(c => c.decision === 'keep').length,
+    duplicate: candidates.filter(c => c.decision === 'duplicate').length,
+    exclude: candidates.filter(c => c.decision === 'exclude').length,
+    reject: candidates.filter(c => c.decision === 'reject').length,
+    needs_review: candidates.filter(c => c.decision === 'needs_review').length,
+  };
+
+  const decisionCounts = {
+    keep: details.decision_counts?.keep || candidateCounts.keep,
+    duplicate: details.decision_counts?.duplicate || candidateCounts.duplicate,
+    exclude: details.decision_counts?.exclude || candidateCounts.exclude,
+    reject: details.decision_counts?.reject || candidateCounts.reject,
+    needs_review: details.decision_counts?.needs_review || candidateCounts.needs_review,
+  };
 
   return (
     <>
@@ -407,6 +437,222 @@ export const RunView: React.FC<RunViewProps> = ({ runId, onRunCompleted, onCance
         </div>
       </section>
 
+      {/* Decision Counts Metric Bar - Top of Run Page (Hackathon Problem Requirement) */}
+      <section
+        aria-label="Decision Counts"
+        data-testid="decision-counts-bar"
+        style={{
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border-color)',
+          borderRadius: '14px',
+          padding: '18px 22px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '14px',
+          boxShadow: 'var(--shadow-sm)'
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-main)', letterSpacing: '-0.01em' }}>
+              Decision Counts
+            </span>
+            <span style={{ fontSize: '12.5px', color: 'var(--text-muted)' }}>
+              • Categorized diagnostic reports for {run.patient_name}
+            </span>
+          </div>
+          <span style={{ fontSize: '12.5px', color: 'var(--text-dim)', fontWeight: 500 }}>
+            {candidates.length} total candidate{candidates.length !== 1 ? 's' : ''} evaluated
+          </span>
+        </div>
+
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+          gap: '12px'
+        }}>
+          {/* Keep */}
+          <div
+            data-testid="metric-keep"
+            style={{
+              background: 'rgba(16, 185, 129, 0.08)',
+              border: '1px solid rgba(16, 185, 129, 0.28)',
+              borderRadius: '10px',
+              padding: '12px 14px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}
+          >
+            <div style={{
+              width: '34px',
+              height: '34px',
+              borderRadius: '8px',
+              background: 'rgba(16, 185, 129, 0.16)',
+              color: '#10b981',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0
+            }}>
+              <CheckCircle2 size={18} strokeWidth={2.5} />
+            </div>
+            <div>
+              <div style={{ fontSize: '20px', fontWeight: 750, color: 'var(--text-main)', lineHeight: 1.1 }}>
+                {decisionCounts.keep}
+              </div>
+              <div style={{ fontSize: '12px', fontWeight: 650, color: '#10b981', marginTop: '2px' }}>
+                Keep
+              </div>
+            </div>
+          </div>
+
+          {/* Duplicate */}
+          <div
+            data-testid="metric-duplicate"
+            style={{
+              background: 'rgba(59, 130, 246, 0.08)',
+              border: '1px solid rgba(59, 130, 246, 0.28)',
+              borderRadius: '10px',
+              padding: '12px 14px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}
+          >
+            <div style={{
+              width: '34px',
+              height: '34px',
+              borderRadius: '8px',
+              background: 'rgba(59, 130, 246, 0.16)',
+              color: '#3b82f6',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0
+            }}>
+              <Copy size={18} strokeWidth={2.2} />
+            </div>
+            <div>
+              <div style={{ fontSize: '20px', fontWeight: 750, color: 'var(--text-main)', lineHeight: 1.1 }}>
+                {decisionCounts.duplicate}
+              </div>
+              <div style={{ fontSize: '12px', fontWeight: 650, color: '#3b82f6', marginTop: '2px' }}>
+                Duplicate
+              </div>
+            </div>
+          </div>
+
+          {/* Excluded */}
+          <div
+            data-testid="metric-exclude"
+            style={{
+              background: 'rgba(245, 158, 11, 0.08)',
+              border: '1px solid rgba(245, 158, 11, 0.28)',
+              borderRadius: '10px',
+              padding: '12px 14px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}
+          >
+            <div style={{
+              width: '34px',
+              height: '34px',
+              borderRadius: '8px',
+              background: 'rgba(245, 158, 11, 0.16)',
+              color: '#f59e0b',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0
+            }}>
+              <Ban size={18} strokeWidth={2.2} />
+            </div>
+            <div>
+              <div style={{ fontSize: '20px', fontWeight: 750, color: 'var(--text-main)', lineHeight: 1.1 }}>
+                {decisionCounts.exclude}
+              </div>
+              <div style={{ fontSize: '12px', fontWeight: 650, color: '#f59e0b', marginTop: '2px' }}>
+                Excluded
+              </div>
+            </div>
+          </div>
+
+          {/* Rejected */}
+          <div
+            data-testid="metric-reject"
+            style={{
+              background: 'rgba(239, 68, 68, 0.08)',
+              border: '1px solid rgba(239, 68, 68, 0.28)',
+              borderRadius: '10px',
+              padding: '12px 14px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}
+          >
+            <div style={{
+              width: '34px',
+              height: '34px',
+              borderRadius: '8px',
+              background: 'rgba(239, 68, 68, 0.16)',
+              color: '#ef4444',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0
+            }}>
+              <XCircle size={18} strokeWidth={2.2} />
+            </div>
+            <div>
+              <div style={{ fontSize: '20px', fontWeight: 750, color: 'var(--text-main)', lineHeight: 1.1 }}>
+                {decisionCounts.reject}
+              </div>
+              <div style={{ fontSize: '12px', fontWeight: 650, color: '#ef4444', marginTop: '2px' }}>
+                Rejected
+              </div>
+            </div>
+          </div>
+
+          {/* Needs Decision / Review */}
+          <div
+            data-testid="metric-needs-review"
+            style={{
+              background: 'rgba(168, 85, 247, 0.08)',
+              border: '1px solid rgba(168, 85, 247, 0.28)',
+              borderRadius: '10px',
+              padding: '12px 14px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}
+          >
+            <div style={{
+              width: '34px',
+              height: '34px',
+              borderRadius: '8px',
+              background: 'rgba(168, 85, 247, 0.16)',
+              color: '#a855f7',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0
+            }}>
+              <AlertTriangle size={18} strokeWidth={2.2} />
+            </div>
+            <div>
+              <div style={{ fontSize: '20px', fontWeight: 750, color: 'var(--text-main)', lineHeight: 1.1 }}>
+                {decisionCounts.needs_review}
+              </div>
+              <div style={{ fontSize: '12px', fontWeight: 650, color: '#a855f7', marginTop: '2px' }}>
+                Needs Decision
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* Two Column Section - matches A_ActiveRun.dc.html */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '24px', alignItems: 'flex-start' }}>
         {/* Steps Card */}
@@ -423,6 +669,8 @@ export const RunView: React.FC<RunViewProps> = ({ runId, onRunCompleted, onCance
                       <circle cx="12" cy="12" r="9"></circle>
                       <path d="M8 12.5l3 3 5-6"></path>
                     </svg>
+                  ) : info.state === 'error' ? (
+                    <XCircle size={22} color="#ef4444" aria-hidden="true" />
                   ) : info.state === 'working' ? (
                     <svg className="spin" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
                       <path d="M12 3a9 9 0 1 0 9 9"></path>
@@ -434,10 +682,10 @@ export const RunView: React.FC<RunViewProps> = ({ runId, onRunCompleted, onCance
                   )}
                   <div style={{ flex: 1, lineHeight: 1.35 }}>
                     <div style={{ fontSize: '16px', fontWeight: 650, color: 'var(--text-main)' }}>{getLabName(labId)}</div>
-                    <div style={{ fontSize: '14px', color: 'var(--text-muted)' }}>{info.text}</div>
+                    <div style={{ fontSize: '14px', color: info.state === 'error' ? '#ef4444' : 'var(--text-muted)' }}>{info.text}</div>
                   </div>
-                  <span className="st" style={{ color: info.state === 'waiting' ? 'var(--text-muted)' : 'var(--primary-dark)' }}>
-                    {info.state === 'done' ? 'Done' : info.state === 'working' ? 'Working' : 'Waiting'}
+                  <span className="st" style={{ color: info.state === 'error' ? '#ef4444' : info.state === 'waiting' ? 'var(--text-muted)' : 'var(--primary-dark)' }}>
+                    {info.state === 'done' ? 'Done' : info.state === 'error' ? 'Failed' : info.state === 'working' ? 'Working' : 'Waiting'}
                   </span>
                 </div>
               );
