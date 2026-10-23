@@ -288,3 +288,36 @@ export async function deleteRuns(runIds?: string[]): Promise<{ status: string; c
   }
   return res.json();
 }
+
+export async function deleteTimelineReport(reportId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/timeline/${encodeURIComponent(reportId)}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to delete report' }));
+    throw new Error(err.detail || 'Failed to delete health record');
+  }
+}
+
+export async function deleteTimelineReports(reportIds?: string[]): Promise<{ status: string; count: number }> {
+  const payload = JSON.stringify(reportIds && reportIds.length > 0 ? { report_ids: reportIds } : {});
+  let res = await fetch(`${API_BASE}/api/timeline`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+    body: payload,
+  });
+  if (!res.ok && res.status === 405) {
+    res = await fetch(`${API_BASE}/api/timeline/delete`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: payload,
+    });
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to delete reports' }));
+    throw new Error(err.detail || 'Failed to delete health records');
+  }
+  return res.json();
+}
+

@@ -707,17 +707,36 @@ class Repository:
             try:
                 async with pool.connection() as conn:
                     async with conn.cursor() as cur:
-                        await cur.execute("SELECT * FROM phr.candidates WHERE id = %s", (candidate_id,))
+                        await cur.execute("SELECT * FROM phr.candidates WHERE id::text = %s", (candidate_id,))
                         row = await cur.fetchone()
+                        if not row:
+                            await cur.execute(
+                                """
+                                SELECT c.* FROM phr.candidates c
+                                JOIN phr.reports r ON (r.candidate_id = c.id OR r.sha256 = c.sha256 OR (r.lab = c.lab AND r.report_id = c.portal_report_id))
+                                WHERE r.id::text = %s OR r.candidate_id::text = %s OR r.report_id = %s
+                                LIMIT 1
+                                """,
+                                (candidate_id, candidate_id, candidate_id)
+                            )
+                            row = await cur.fetchone()
                         if row:
                             d = dict(row)
                             d["id"] = str(d["id"])
                             if d.get("run_id"):
                                 d["run_id"] = str(d["run_id"])
                             return d
-            except Exception:
-                pass
-        return _MEM_CANDIDATES.get(candidate_id)
+            except Exception as e:
+                logger.warning(f"Error querying candidate by id/report {candidate_id}: {e}")
+
+        if candidate_id in _MEM_CANDIDATES:
+            return _MEM_CANDIDATES[candidate_id]
+        for rep in _MEM_REPORTS.values():
+            if rep.get("id") == candidate_id or rep.get("candidate_id") == candidate_id or rep.get("report_uuid") == candidate_id:
+                cid = rep.get("candidate_id")
+                if cid and cid in _MEM_CANDIDATES:
+                    return _MEM_CANDIDATES[cid]
+        return None
 
     @staticmethod
     async def get_candidates_for_run(run_id: str) -> List[Dict[str, Any]]:
@@ -948,6 +967,14 @@ class Repository:
                         if existing_row:
                             logger.info(f"Duplicate report detected for {lab}/{report_id} ({sha256[:8]}). Linking candidate without duplicating report row.")
                             await cur.execute(
+                                """
+                                UPDATE phr.reports 
+                                SET candidate_id = COALESCE(candidate_id, %s)
+                                WHERE id = %s
+                                """,
+                                (candidate_id, existing_row["id"])
+                            )
+                            await cur.execute(
                                 "UPDATE phr.candidates SET status = 'stored' WHERE id = %s",
                                 (candidate_id,)
                             )
@@ -1048,7 +1075,7 @@ class Repository:
                             SELECT
                                 r.id AS report_uuid,
                                 r.user_id,
-                                r.candidate_id,
+                                COALESCE(r.candidate_id, c.id) AS candidate_id,
                                 r.patient_key,
                                 r.lab,
                                 r.report_id,
@@ -1056,13 +1083,17 @@ class Repository:
                                 r.report_date,
                                 r.sha256,
                                 r.created_at,
-                                c.filename,
-                                c.x_name,
+                                COALESCE(c.filename, r.report_id || '.pdf') AS filename,
+                                COALESCE(c.x_name, r.patient_key) AS x_name,
                                 c.x_patient_id,
-                                c.recheck_ok,
+                                COALESCE(c.recheck_ok, true) AS recheck_ok,
                                 c.recheck_note
                             FROM phr.reports r
-                            LEFT JOIN phr.candidates c ON r.candidate_id = c.id
+                            LEFT JOIN phr.candidates c ON (
+                                r.candidate_id = c.id 
+                                OR r.sha256 = c.sha256 
+                                OR (r.lab = c.lab AND r.report_id = c.portal_report_id)
+                            )
                         """
                         where_clauses = []
                         params = []
@@ -1101,7 +1132,7 @@ class Repository:
             timeline.append({
                 "report_uuid": rep["id"],
                 "user_id": rep.get("user_id"),
-                "candidate_id": rep.get("candidate_id"),
+                "candidate_id": rep.get("candidate_id") or cand.get("id"),
                 "patient_key": rep["patient_key"],
                 "lab": rep["lab"],
                 "report_id": rep["report_id"],
@@ -1109,11 +1140,106 @@ class Repository:
                 "report_date": rep["report_date"],
                 "sha256": rep["sha256"],
                 "created_at": rep["created_at"],
-                "filename": cand.get("filename"),
-                "x_name": cand.get("x_name"),
+                "filename": cand.get("filename") or f"{rep['report_id']}.pdf",
+                "x_name": cand.get("x_name") or rep["patient_key"],
                 "x_patient_id": cand.get("x_patient_id"),
-                "recheck_ok": cand.get("recheck_ok"),
+                "recheck_ok": cand.get("recheck_ok", True),
                 "recheck_note": cand.get("recheck_note")
             })
         timeline.sort(key=lambda x: str(x.get("report_date", "")), reverse=True)
         return timeline
+
+    @staticmethod
+    async def delete_timeline_report(report_id: str, user_id: Optional[str] = None) -> bool:
+        """Deletes a single health report from the timeline."""
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        if user_id:
+                            await cur.execute(
+                                "DELETE FROM phr.reports WHERE id = %s AND (user_id = %s OR user_id IS NULL) RETURNING id",
+                                (report_id, user_id)
+                            )
+                        else:
+                            await cur.execute(
+                                "DELETE FROM phr.reports WHERE id = %s RETURNING id",
+                                (report_id,)
+                            )
+                        row = await cur.fetchone()
+                        await conn.commit()
+                        return bool(row)
+            except Exception as e:
+                logger.error(f"Error deleting report {report_id}: {e}")
+                pass
+
+        if report_id in _MEM_REPORTS:
+            rep = _MEM_REPORTS[report_id]
+            if user_id and rep.get("user_id") and rep["user_id"] != user_id:
+                return False
+            del _MEM_REPORTS[report_id]
+            return True
+        return False
+
+    @staticmethod
+    async def delete_timeline_reports(report_ids: List[str], user_id: Optional[str] = None) -> int:
+        """Deletes multiple selected reports from the timeline."""
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        if user_id:
+                            await cur.execute(
+                                "DELETE FROM phr.reports WHERE id = ANY(%s) AND (user_id = %s OR user_id IS NULL) RETURNING id",
+                                (report_ids, user_id)
+                            )
+                        else:
+                            await cur.execute(
+                                "DELETE FROM phr.reports WHERE id = ANY(%s) RETURNING id",
+                                (report_ids,)
+                            )
+                        rows = await cur.fetchall()
+                        await conn.commit()
+                        return len(rows)
+            except Exception as e:
+                logger.error(f"Error deleting batch reports: {e}")
+                pass
+
+        count = 0
+        for rid in report_ids:
+            if await Repository.delete_timeline_report(rid, user_id=user_id):
+                count += 1
+        return count
+
+    @staticmethod
+    async def clear_all_timeline(user_id: Optional[str] = None) -> int:
+        """Clears all health reports from the timeline."""
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        if user_id:
+                            await cur.execute(
+                                "DELETE FROM phr.reports WHERE (user_id = %s OR user_id IS NULL) RETURNING id",
+                                (user_id,)
+                            )
+                        else:
+                            await cur.execute("DELETE FROM phr.reports RETURNING id")
+                        rows = await cur.fetchall()
+                        await conn.commit()
+                        return len(rows)
+            except Exception as e:
+                logger.error(f"Error clearing timeline: {e}")
+                pass
+
+        global _MEM_REPORTS
+        initial_len = len(_MEM_REPORTS)
+        if user_id:
+            _MEM_REPORTS = {rid: r for rid, r in _MEM_REPORTS.items() if r.get("user_id") and r["user_id"] != user_id}
+            return initial_len - len(_MEM_REPORTS)
+        else:
+            _MEM_REPORTS = {}
+            return initial_len

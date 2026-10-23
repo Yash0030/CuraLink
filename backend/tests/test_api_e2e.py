@@ -138,6 +138,21 @@ async def test_api_e2e_lifecycle():
         assert res_file.headers["content-type"] == "application/pdf"
         assert res_file.content.startswith(b"%PDF")
 
+        # 10. GET /api/files/{report_uuid} (stream PDF via report UUID fallback)
+        rep_uuid = timeline[0]["report_uuid"]
+        res_file_uuid = await client.get(f"/api/files/{rep_uuid}")
+        assert res_file_uuid.status_code == 200
+        assert res_file_uuid.headers["content-type"] == "application/pdf"
+
+        # 11. DELETE /api/timeline/{report_uuid}
+        del_res = await client.delete(f"/api/timeline/{rep_uuid}")
+        assert del_res.status_code == 200
+        assert del_res.json()["status"] == "deleted"
+
+        # Verify deletion
+        res_timeline_after = await client.get(f"/api/timeline?patient_key={patient_key}")
+        assert all(t["report_uuid"] != rep_uuid for t in res_timeline_after.json())
+
 @pytest.mark.asyncio
 async def test_cancel_and_delete_runs():
     transport = httpx.ASGITransport(app=app)

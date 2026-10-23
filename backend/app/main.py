@@ -40,7 +40,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.db.connection import init_pool, close_pool
+from app.db.connection import init_pool, close_pool, get_db_pool
 from app.db.repository import Repository
 from app.tools.captcha_manager import CaptchaManager
 from app.portal_selectors import PORTAL_CONFIG
@@ -690,6 +690,9 @@ async def delete_runs(
 
     return {"status": "deleted", "count": count}
 
+class BatchDeleteReportsRequest(BaseModel):
+    report_ids: Optional[List[str]] = None
+
 @app.get("/api/timeline")
 async def get_timeline(
     patient_key: Optional[str] = None,
@@ -699,10 +702,62 @@ async def get_timeline(
     user_id = str(current_user["id"]) if current_user else None
     return await Repository.get_timeline(patient_key, user_id=user_id)
 
+@app.delete("/api/timeline/{report_id}")
+async def delete_timeline_report(
+    report_id: str,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    """Deletes a single health record from the patient timeline."""
+    user_id = str(current_user["id"]) if current_user else None
+    deleted = await Repository.delete_timeline_report(report_id, user_id=user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Health record not found or not owned by you")
+    return {"status": "deleted", "report_id": report_id}
+
+@app.delete("/api/timeline")
+@app.post("/api/timeline/delete")
+async def delete_timeline_reports(
+    req: Optional[BatchDeleteReportsRequest] = None,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    """Deletes selected health records or clears all timeline records."""
+    user_id = str(current_user["id"]) if current_user else None
+    if req and req.report_ids:
+        count = await Repository.delete_timeline_reports(req.report_ids, user_id=user_id)
+    else:
+        count = await Repository.clear_all_timeline(user_id=user_id)
+    return {"status": "deleted", "count": count}
+
 @app.get("/api/files/{candidate_id}")
+@app.get("/api/timeline/{candidate_id}/file")
+@app.get("/api/reports/{candidate_id}/file")
 async def get_candidate_file(candidate_id: str):
     """Streams candidate PDF document for in-browser viewing."""
+    # 1. Search candidate directly by ID
     candidate = await Repository.get_candidate(candidate_id)
+    
+    # 2. If candidate_id is actually a report UUID, resolve through report table
+    if not candidate or not candidate.get("file_bytes"):
+        pool = get_db_pool()
+        if pool and not pool.closed:
+            try:
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            SELECT c.* FROM phr.candidates c
+                            JOIN phr.reports r ON (r.candidate_id = c.id OR r.sha256 = c.sha256 OR (r.lab = c.lab AND r.report_id = c.portal_report_id))
+                            WHERE r.id::text = %s OR r.candidate_id::text = %s OR r.report_id = %s
+                            LIMIT 1
+                            """,
+                            (candidate_id, candidate_id, candidate_id)
+                        )
+                        row = await cur.fetchone()
+                        if row:
+                            candidate = dict(row)
+            except Exception as e:
+                logger.warning(f"Error resolving candidate through report join: {e}")
+
     if not candidate or not candidate.get("file_bytes"):
         raise HTTPException(status_code=404, detail="PDF file not found")
 

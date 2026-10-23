@@ -43,17 +43,22 @@ async def seed_scenarios():
 
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
-            print("Cleaning up previously seeded demo test runs...")
-            # Remove candidates and events associated with demo runs
+            print("Cleaning up previously seeded demo test runs and reports...")
+            await cur.execute("""
+                DELETE FROM phr.reports 
+                WHERE patient_key IN ('aarav_roy', 'aarav_roy_pt001', 'reyansh_reddy', 'reyansh_reddy_pt002')
+                   OR candidate_id IS NULL;
+            """)
             await cur.execute("""
                 DELETE FROM phr.runs 
-                WHERE patient_id IN ('pt001', 'pt002', 'pt003', 'pt004', 'pt005', 'pt006')
+                WHERE patient_id IN ('pt001', 'pt002', 'pt003', 'pt004', 'pt005', 'pt006', 'pt999')
                    OR LOWER(patient_name) LIKE '%aarav%'
                    OR LOWER(patient_name) LIKE '%reyansh%'
                    OR LOWER(patient_name) LIKE '%gopal%'
                    OR LOWER(patient_name) LIKE '%aditya%'
                    OR LOWER(patient_name) LIKE '%anita%'
-                   OR LOWER(patient_name) LIKE '%mohan%';
+                   OR LOWER(patient_name) LIKE '%mohan%'
+                   OR LOWER(patient_name) LIKE '%test%';
             """)
             await conn.commit()
 
